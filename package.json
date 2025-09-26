@@ -1,0 +1,20 @@
+{
+  "name": "react-nestjs-mongo-simple",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "npm --workspace apps/web run dev",
+    "dev:api": "npm --workspace apps/api run start:dev",
+    "dev": "concurrently -n WEB,API -c auto \"npm:dev:web\" \"npm:dev:api\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  },
+  "dependencies": {
+    "@nestjs/jwt": "^11.0.0",
+    "dotenv": "^17.2.2"
+  }
+}
