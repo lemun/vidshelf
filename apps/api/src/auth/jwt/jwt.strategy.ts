@@ -5,7 +5,7 @@ import { environments } from 'src/environments/environments';
 import { UsersService } from 'src/users/users.service';
 
 @Injectable()
-export class JwtStrategy extends PassportStrategy(Strategy) {
+export class JwtStrategy extends PassportStrategy(Strategy, 'JWT') {
   constructor(
     @Inject(UsersService) private readonly usersService: UsersService,
   ) {
