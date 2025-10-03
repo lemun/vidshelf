@@ -1,13 +1,13 @@
 import {
-    ConflictException,
-    Inject,
-    Injectable,
-    InternalServerErrorException,
-    NotFoundException,
-    UnauthorizedException,
+  ConflictException,
+  Inject,
+  Injectable,
+  InternalServerErrorException,
+  NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { UsersService } from 'src/users/users.service';
-import { comparePassword, generateHash } from 'src/utils/bcrypt';
+import { comparePassword } from 'src/utils/bcrypt';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { CustomJwtService } from './jwt/jwt.service';
@@ -24,7 +24,7 @@ export class AuthService {
 
   async login(loginDto: LoginDto) {
     try {
-      const { email } = loginDto;
+      const { email, password } = loginDto;
       const existingUser = await this.usersService.getUserByEmail(email);
 
       if (!existingUser) {
@@ -32,7 +32,7 @@ export class AuthService {
       }
 
       const hashedPassword = await comparePassword(
-        loginDto.password,
+        password,
         existingUser.password,
       );
 
@@ -41,6 +41,7 @@ export class AuthService {
       }
 
       const accessToken = this.jwtService.generateToken({ email });
+
       return {
         entity: existingUser,
         token: accessToken,
@@ -67,11 +68,9 @@ export class AuthService {
       throw new ConflictException('Email already exists');
     }
 
-    const passwordHash = await generateHash(password);
-
     const user = await this.usersService.createUser({
       email,
-      password: passwordHash,
+      password: password,
     });
     return { message: 'User created successfully', user };
   }
