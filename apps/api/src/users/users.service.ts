@@ -41,6 +41,18 @@ export class UsersService {
     }
   }
 
+  async getAllUsers(): Promise<User[]> {
+    try {
+      return await this.userRepository.getUsers({});
+    } catch (error) {
+      throw new InternalServerErrorException(
+        'Failed to get all users',
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+        error,
+      );
+    }
+  }
+
   async createUser(createUserDto: CreateUserDto): Promise<User> {
     try {
       const existingUser = await this.userRepository.getUserByEmail(
