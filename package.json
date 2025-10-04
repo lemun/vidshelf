@@ -1,5 +1,5 @@
 {
-  "name": "react-nestjs-mongo-simple",
+  "name": "react-nestjs-mongo-video",
   "private": true,
   "workspaces": [
     "apps/*",
@@ -12,10 +12,5 @@
   },
   "devDependencies": {
     "concurrently": "^9.2.1"
-  },
-  "dependencies": {
-    "@nestjs/jwt": "^11.0.0",
-    "dotenv": "^17.2.2",
-    "uuid": "^13.0.0"
   }
 }

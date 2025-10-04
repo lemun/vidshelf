@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-unsafe-call */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import {
   Body,
   Controller,
@@ -5,7 +7,6 @@ import {
   Param,
   Patch,
   Post,
-  Query,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiParam } from '@nestjs/swagger';
@@ -25,6 +26,29 @@ export class UsersController {
     return this.usersService.createUser(createUserDto);
   }
 
+  @ApiBearerAuth()
+  @Get()
+  async findAll() {
+    const users = await this.usersService.getAllUsers();
+    // Transform MongoDB documents to match frontend expectations
+    const transformedUsers = users.map((user: any) => ({
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      id: user._id.toString(),
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      email: user.email,
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      bio: user.bio || '',
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      avatarUrl: user.avatarUrl || '',
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      createdAt: user.createdAt
+        ? // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
+          new Date(user.createdAt).getTime()
+        : Date.now(),
+    }));
+    return { data: transformedUsers };
+  }
+
   @ApiParam({
     name: 'id',
     description: 'Id of user to',
@@ -34,7 +58,7 @@ export class UsersController {
   })
   @ApiBearerAuth()
   @Get(':id')
-  findAll(@Query('id') id: string) {
+  findOne(@Param('id') id: string) {
     return this.usersService.readUserById(id);
   }
 
