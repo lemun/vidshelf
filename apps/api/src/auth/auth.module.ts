@@ -1,35 +1,32 @@
+import { Module, forwardRef } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
+import { MongooseModule } from '@nestjs/mongoose';
 import { PassportModule } from '@nestjs/passport';
 
-import { Module } from '@nestjs/common';
-import { MongooseModule } from '@nestjs/mongoose';
-import { environments } from 'src/environments/environments';
-import { UsersModule } from 'src/users/users.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
-import { CustomJwtService } from './jwt/jwt.service';
-import { JwtStrategy } from './jwt/jwt.strategy';
-import { ResetToken, ResetTokenSchema } from './models/resettokens.model';
-import { ResetTokenRepository } from './repositories/resettoken.repository';
+
+import { JwtRefreshGuard } from './guards/jwt-refresh.guard';
+import { JwtRefreshStrategy } from './strategies/jwt-refresh.strategy';
+import { JwtStrategy } from './strategies/jwt.strategy';
+
+import { User, UserSchema } from '../users/schemas/user.schema';
+import { UsersModule } from '../users/users.module';
+import { RefreshToken, RefreshTokenSchema } from './schemas/refresh-token.schema';
 
 @Module({
-  imports: [
-    PassportModule,
-    JwtModule.registerAsync({
-      useFactory: () => ({
-        secret: environments.jwtSecret,
-        signOptions: {
-          expiresIn: environments.jwtAccessTokenTtl,
-        },
-      }),
-    }),
-    MongooseModule.forFeature([
-      { name: ResetToken.name, schema: ResetTokenSchema },
-    ]),
-    UsersModule,
-  ],
-  controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, CustomJwtService, ResetTokenRepository],
-  exports: [AuthService],
+    imports: [
+        PassportModule,
+        JwtModule.register({}),
+        MongooseModule.forFeature([
+            { name: User.name, schema: UserSchema },
+            { name: RefreshToken.name, schema: RefreshTokenSchema },
+        ]),
+        forwardRef(() => UsersModule),
+    ],
+    controllers: [AuthController],
+    providers: [AuthService, JwtStrategy, JwtRefreshStrategy, JwtRefreshGuard],
+    exports: [AuthService],
 })
+
 export class AuthModule {}

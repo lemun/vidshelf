@@ -1,77 +1,56 @@
-import {
-  ConflictException,
-  Inject,
-  Injectable,
-  InternalServerErrorException,
-  NotFoundException,
-  UnauthorizedException,
-} from '@nestjs/common';
-import { UsersService } from 'src/users/users.service';
-import { comparePassword } from 'src/utils/bcrypt';
+import { Injectable } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model, Types } from 'mongoose';
+
+import { User } from '../users/schemas/user.schema';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
-import { CustomJwtService } from './jwt/jwt.service';
-import { ResetTokenRepository } from './repositories/resettoken.repository';
+import { JwtTokenPair } from './interfaces/jwt-token-pair';
+import { RefreshToken } from './schemas/refresh-token.schema';
 
 @Injectable()
 export class AuthService {
   constructor(
-    @Inject(UsersService) private readonly usersService: UsersService,
-    @Inject(CustomJwtService) private readonly jwtService: CustomJwtService,
-    @Inject(ResetTokenRepository)
-    private readonly resetTokenRepository: ResetTokenRepository,
+    private readonly jwtService: JwtService,
+    @InjectModel('User') private readonly userModel: Model<User>,
+    @InjectModel(RefreshToken.name) private readonly rtModel: Model<RefreshToken>,
   ) {}
 
-  async login(loginDto: LoginDto) {
-    try {
-      const { email, password } = loginDto;
-      const existingUser = await this.usersService.getUserByEmail(email);
-
-      if (!existingUser) {
-        throw new NotFoundException('Invalid e-mail or password');
-      }
-
-      const hashedPassword = await comparePassword(
-        password,
-        existingUser.password,
-      );
-
-      if (!hashedPassword) {
-        throw new UnauthorizedException('Invalid e-mail or password');
-      }
-
-      const accessToken = this.jwtService.generateToken({ email });
-
-      return {
-        entity: existingUser,
-        token: accessToken,
-      };
-    } catch (error) {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-      throw new InternalServerErrorException('Failed to login', error);
-    }
+  async register(_dto: RegisterDto) {
+    // TODO: create user, hash password, save, issue tokens
+    return { user: null, tokens: null};
   }
 
-  logout() {
-    try {
-      return { message: 'Logged out successfully' };
-    } catch (error) {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-      throw new InternalServerErrorException('Failed to logout', error);
-    }
+  async login(_dto: LoginDto) {
+    // TODO: validate creds, issue tokens
+    return { user: null, tokens: null };
   }
 
-  async register(registerDto: RegisterDto) {
-    const { email, password } = registerDto;
-    const existingUser = await this.usersService.getUserByEmail(email);
-    if (existingUser) {
-      throw new ConflictException('Email already exists');
-    }
+  async logout(_userId: string) {
+    // TODO: revoke refresh tokens
+    return { success: true };
+  }
 
-    const user = await this.usersService.createUser({
-      email,
-      password: password,
-    });
-    return { message: 'User created successfully', user };
+  async rotateRefreshToken(_refreshToken: string) {
+    // TODO: verify, rotate tokens
+    return { tokens: null };
+  }
+
+  async getProfile(_userId: string) {
+    // TODO: return safe user
+    return { user: null };
+  }
+
+  async issueTokenPair(_user: User): Promise<JwtTokenPair> {
+    return { accessToken: '', refreshToken: '' };
+  }
+
+  async storeRefreshToken(_userId: Types.ObjectId, _refreshToken: string, _meta?: { ip?: string, userAgent?: string }) {
+    return {};
+  }
+
+  async revokeRefreshToken(_userId: string, _token?: string) {
+    return { success: true };
   }
 }

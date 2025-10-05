@@ -1,50 +1,40 @@
 import { ApiProperty } from '@nestjs/swagger';
-import {
-    IsEmail,
-    IsNotEmpty,
-    IsString,
-    MaxLength,
-    MinLength,
-} from 'class-validator';
+import { IsEmail, IsNotEmpty, IsOptional, IsString, IsUrl, Matches, MaxLength, MinLength } from 'class-validator';
 
-export class CreateUserDto {
-  @ApiProperty({
-    title: 'Email',
-    name: 'email',
-    description: 'The email of a user',
-    example: 'test@test.com',
-    required: true,
-    type: String,
-    format: 'email',
-    pattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$',
-    minLength: 5,
-    maxLength: 255,
-    uniqueItems: true,
-  })
-  @IsEmail()
-  @IsNotEmpty()
-  @IsString()
-  @MinLength(5)
-  @MaxLength(255)
-  email: string;
+export class createUserDto {
+    @ApiProperty({ example: 'shaisinai', description: 'Unique username' })
+    @IsString()
+    @IsNotEmpty()
+    @MinLength(3)
+    @MaxLength(20)
+    username!: string;
 
-  @ApiProperty({
-    title: 'Password',
-    name: 'password',
-    description: 'The password of a user',
-    example: 'Abcd1234#',
-    required: true,
-    type: String,
-    format: 'password',
-    pattern:
-      '^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[@$!%*?&])[A-Za-z\\d@$!%*?&]{8,}$',
-    minLength: 8,
-    maxLength: 20,
-    uniqueItems: true,
-  })
-  @IsString()
-  @IsNotEmpty()
-  @MinLength(8)
-  @MaxLength(20)
-  password: string;
+    @ApiProperty({ example: 'user@example.com' })
+    @IsEmail()
+    email!: string;
+
+    @ApiProperty({ example: 'StrongPass123!', description: 'Password (min 8 chars, must include letters & numbers)' })
+    @IsOptional()
+    @IsString()
+    @MinLength(8)
+    @Matches(/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d\s]{8,}$/, {
+        message: 'Password must contain letters and numbers',
+    })
+    password?: string;
+
+    @ApiProperty({ example: 'https://example.com/avatar.png', required: false })
+    @IsOptional()
+    @IsUrl()
+    avatarUrl?: string;
+
+    @ApiProperty({ example: 'https://example.com/banner.png', required: false })
+    @IsOptional()
+    @IsUrl()
+    bannerUrl?: string;
+
+    @ApiProperty({ example: 'About me...', required: false, maxLength: 300 })
+    @IsOptional()
+    @IsString()
+    @MaxLength(300)
+    about?: string;
 }

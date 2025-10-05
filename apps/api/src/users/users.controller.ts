@@ -1,89 +1,55 @@
-/* eslint-disable @typescript-eslint/no-unsafe-call */
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
-import {
-  Body,
-  Controller,
-  Get,
-  Param,
-  Patch,
-  Post,
-  UseGuards,
-} from '@nestjs/common';
-import { ApiBearerAuth, ApiParam } from '@nestjs/swagger';
-import { JwtAuthGuard } from '../auth/guards/auth.guard';
-import { CreateUserDto } from './dto/create-user.dto';
+import { Body, Controller, Delete, Get, Param, Patch, Query, Req, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { ParseObjectIdPipe } from '../common/pipes/parse-objectid.pipe';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { UsersService } from './users.service';
 
+@ApiTags('Users')
 @Controller('users')
-@UseGuards(JwtAuthGuard)
 export class UsersController {
-  constructor(private readonly usersService: UsersService) {}
+    constructor(private readonly users: UsersService) {}
 
-  @ApiBearerAuth()
-  @Post()
-  create(@Body() createUserDto: CreateUserDto) {
-    return this.usersService.createUser(createUserDto);
-  }
+    // GET users
 
-  @ApiBearerAuth()
-  @Get()
-  async findAll() {
-    const users = await this.usersService.getAllUsers();
-    // Transform MongoDB documents to match frontend expectations
-    const transformedUsers = users.map((user: any) => ({
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      id: user._id.toString(),
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      email: user.email,
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      bio: user.bio || '',
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      avatarUrl: user.avatarUrl || '',
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      createdAt: user.createdAt
-        ? // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access
-          new Date(user.createdAt).getTime()
-        : Date.now(),
-    }));
-    return { data: transformedUsers };
-  }
+    @Get(':id')
+    @ApiOperation({ summary: 'Get a user public profile' })
+    findOne(@Param('id', ParseObjectIdPipe) id: string) {
+        return this.users.findById(id);
+    }
 
-  @ApiParam({
-    name: 'id',
-    description: 'Id of user to',
-    type: String,
-    required: true,
-    example: '6806287ea2d840de8bee3064',
-  })
-  @ApiBearerAuth()
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.usersService.readUserById(id);
-  }
+    @ApiBearerAuth()
+    @UseGuards(JwtAuthGuard)
+    @Patch(':id')
+    @ApiOperation({ summary: 'Update user profile (self)' })
+    update(
+        @Param('id', ParseObjectIdPipe) id: string,
+        @Body() dto: UpdateUserDto,
+        @Req() req: any,
+    ) {
+        return this.users.update(id, dto, req.user.userId);
+    }
 
-  @ApiParam({
-    name: 'id',
-    description: 'Id of user to',
-    type: String,
-    required: true,
-    example: '6806287ea2d840de8bee3064',
-  })
-  @ApiBearerAuth()
-  @Patch(':id')
-  update(@Param('id') id: string, @Body() updateUserDto: UpdateUserDto) {
-    return this.usersService.updateUser(id, updateUserDto);
-  }
+    @ApiBearerAuth()
+    @UseGuards(JwtAuthGuard)
+    @Delete(':id')
+    @ApiOperation({ summary: 'Delete user (self or admin)' })
+    remove(@Param('id', ParseObjectIdPipe) id: string, @Req() req: any) {
+        return this.users.remove(id, req.user.userId);
+    }
 
-  @ApiParam({
-    name: 'id',
-    description: 'Id of user to delete',
-    type: String,
-    required: true,
-    example: '6806287ea2d840de8bee3064',
-  })
-  @ApiBearerAuth()
-  remove(@Param('id') id: string) {
-    return this.usersService.deleteUser(id);
-  }
+    @Get(':id/videos')
+    @ApiOperation({ summary: 'List videos uploaded by this user' })
+    getVideos(@Param('id', ParseObjectIdPipe) id: string, @Query() q: any) {
+        return this.users.getVideos(id, q);
+    }
+
+    // GET playlists
+    // GET subscribers
+    // GET subscriptions
+    // PATCH subscribe
+    // PATCH unsubscribe
+    // GET history
+    // DELETE history
+
 }
