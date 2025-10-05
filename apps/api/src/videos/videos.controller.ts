@@ -1,17 +1,26 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { ParseObjectIdPipe } from '../common/pipes/parse-objectid.pipe';
 
+import { FileInterceptor } from '@nestjs/platform-express';
 import { CreateVideoDto } from './dto/create-video.dto';
 import { UpdateVideoDto } from './dto/update-video.dto';
 import { VideosService } from './videos.service';
+
 
 @ApiTags('Videos')
 @Controller('videos')
 export class VideosController {
     constructor(private readonly videos: VideosService) {}
+
+    @Post('upload')
+    @ApiOperation({ summary: 'Upload a video file' })
+    @UseInterceptors(FileInterceptor('file'))
+    async upload(@UploadedFile() file: Express.Multer.File) {
+        return this.videos.uploadFile(file);
+    }
 
     @ApiBearerAuth()
     @UseGuards(JwtAuthGuard)

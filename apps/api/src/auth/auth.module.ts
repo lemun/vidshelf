@@ -17,7 +17,10 @@ import { RefreshToken, RefreshTokenSchema } from './schemas/refresh-token.schema
 @Module({
     imports: [
         PassportModule,
-        JwtModule.register({}),
+        JwtModule.register({
+            secret: process.env.JWT_ACCESS_TOKEN_SECRET,
+            signOptions: { expiresIn: process.env.JWT_ACCESS_TOKEN_TTL },
+        }),
         MongooseModule.forFeature([
             { name: User.name, schema: UserSchema },
             { name: RefreshToken.name, schema: RefreshTokenSchema },

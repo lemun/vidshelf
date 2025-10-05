@@ -22,5 +22,5 @@ export class RegisterDto {
   @Matches(/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d\s]{8,}$/, {
     message: 'Password must contain letters and numbers',
   })
-  pasword!: string;
+  password!: string;
 }

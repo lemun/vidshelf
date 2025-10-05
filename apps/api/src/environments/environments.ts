@@ -20,4 +20,10 @@ export const environments = {
   jwtRefreshTokenSecret: assertEnvironment('JWT_REFRESH_TOKEN_SECRET'),
   mongoUri: assertEnvironment('MONGO_URI'),
   saltWorkFactor: assertEnvironment('SALT_WORK_FACTOR'),
+  minioEndpoint: assertEnvironment('MINIO_ENDPOINT'),
+  minioPort: assertEnvironment('MINIO_PORT'),
+  minioAccessKey: assertEnvironment('MINIO_ACCESS_KEY'),
+  minioSecretKey: assertEnvironment('MINIO_SECRET_KEY'),
+  minioBucket: assertEnvironment('MINIO_BUCKET'),
+  minioUseSsl: assertEnvironment('MINIO_USE_SSL'),
 };

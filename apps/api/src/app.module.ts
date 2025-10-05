@@ -1,9 +1,11 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { MongooseModule } from '@nestjs/mongoose';
 import { AuthModule } from './auth/auth.module';
-import { environments } from './environments/environments';
+import { DatabaseModule } from './database/database.module';
+import { MinioModule } from './minio/minio.module';
+import { SettingsModule } from './settings/settings.module';
 import { UsersModule } from './users/users.module';
+import { VideosModule } from './videos/videos.module';
 
 @Module({
   imports: [
@@ -13,8 +15,10 @@ import { UsersModule } from './users/users.module';
     }),
     AuthModule,
     UsersModule,
-
-    MongooseModule.forRoot(environments.mongoUri),
+    VideosModule,
+    SettingsModule,
+    MinioModule,
+    DatabaseModule,
   ],
   controllers: [],
   providers: [],
