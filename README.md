@@ -231,3 +231,7 @@ docker-compose.yml, .env.example, .github/workflows/ci.yml
   files whose delete failed. A bucket lifecycle rule or a sweeper job would clean them up.
 - **Search is MongoDB `$text`** (word stems, not prefixes or typos).
 - **Single region, no CDN, no HTTPS termination.** Set `COOKIE_SECURE=true` behind HTTPS.
+
+## License
+
+[MIT](LICENSE)

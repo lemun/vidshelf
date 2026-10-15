@@ -2,7 +2,7 @@
   "name": "vidshelf",
   "private": true,
   "description": "Small full-stack video sharing app: NestJS + MongoDB + MinIO API, React + Vite + Tailwind web client.",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "workspaces": [
     "apps/api",
     "apps/web"
