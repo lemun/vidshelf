@@ -165,7 +165,16 @@ describe('Vidshelf API (e2e)', () => {
       expect(second).not.toBe(first);
       expect((rotated.body as AuthBody).accessToken).toEqual(expect.any(String));
 
-      // Replaying the consumed token is treated as theft...
+      // A second tab that sent the same token at once gets one grace answer: an access token, and
+      // no new cookie (the winning refresh already set it).
+      const graced = await request(server)
+        .post('/api/auth/refresh')
+        .set('Cookie', first)
+        .expect(200);
+      expect((graced.body as AuthBody).accessToken).toEqual(expect.any(String));
+      expect(graced.headers['set-cookie']).toBeUndefined();
+
+      // Replaying the consumed token again is treated as theft...
       await request(server).post('/api/auth/refresh').set('Cookie', first).expect(401);
       // ...so the legitimately rotated token is now dead too.
       await request(server).post('/api/auth/refresh').set('Cookie', second).expect(401);

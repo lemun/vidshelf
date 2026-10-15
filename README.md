@@ -15,21 +15,29 @@ to end, and [What is not done](#what-is-not-done) lists what is missing.
 
 ## Status
 
-| Check                                                      | How                                                                           | State                    |
-| ---------------------------------------------------------- | ----------------------------------------------------------------------------- | ------------------------ |
-| Lint, typecheck, unit + HTTP-layer tests, production build | `npm run lint && npm run typecheck && npm test && npm run build` (also in CI) | Passing locally          |
-| API end-to-end tests (real MongoDB + MinIO)                | [Tests](#tests)                                                               | **Written, not yet run** |
-| Browser smoke test (Playwright)                            | [Tests](#tests)                                                               | **Written, not yet run** |
-| `docker compose up --build`                                | [Run it](#run-it)                                                             | **Written, not yet run** |
+| Check                                                      | How                                                                           | State           |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------- | --------------- |
+| Lint, typecheck, unit + HTTP-layer tests, production build | `npm run lint && npm run typecheck && npm test && npm run build` (also in CI) | Passing locally |
+| API end-to-end tests (real MongoDB + MinIO)                | [Tests](#tests)                                                               | Passing locally |
+| Browser smoke test (Playwright)                            | [Tests](#tests)                                                               | Passing locally |
+| `docker compose up --build`                                | [Run it](#run-it)                                                             | Passing locally |
 
-The last three need Docker, and they have not been run on the machine this was finished on. Until
-they pass, treat the compose and e2e instructions below as untested.
+The last three need Docker. They ran on 2026-10-15 against this compose stack (OrbStack on an
+Apple Silicon Mac): 17 API end-to-end tests and the browser smoke test passed. CI does not run them
+yet. That first real run found a bug the mocked tests could not: the `ObjectId` references in the
+Mongoose schemas were declared so that they became untyped (`Mixed`) paths, so refresh-token
+rotation never matched its session. `apps/api/src/schemas.spec.ts` now guards against it.
 
 ## Screenshots
 
-_TODO: none yet._ They will come from a real run, not mockups:
-`docker compose up --build -d && SCREENSHOTS=1 npx playwright test screenshots` writes
-`docs/screenshots/home.png`, `watch.png` and `upload.png`.
+Taken by Playwright from the running compose stack, not mockups. To regenerate them:
+`docker compose up --build -d && SCREENSHOTS=1 npx playwright test screenshots`.
+
+![Home: video grid with search](docs/screenshots/home.png)
+
+![Watch page: player, likes, owner delete and the "more videos" rail](docs/screenshots/watch.png)
+
+![Upload: poster frame and duration taken in the browser](docs/screenshots/upload.png)
 
 ## Architecture
 
@@ -203,6 +211,7 @@ The browser test needs Chromium installed once with `npx playwright install chro
   - `videos.service.spec.ts`: upload policy limits, key ownership, publish checks, search and
     sort, ownership on edit and delete, atomic likes, views.
   - `env.spec.ts`: environment validation, including the bcrypt cost floor.
+  - `schemas.spec.ts`: user references in the Mongoose schemas are real `ObjectId` paths.
   - `apps/web/src/lib/api.test.ts` (Vitest): a refresh still in flight at sign-out, or at a new
     sign-in, is cancelled and its late response is ignored.
 - **HTTP layer** (`http.spec.ts`): the real controllers, global guard, validation pipe, refresh
@@ -210,7 +219,7 @@ The browser test needs Chromium installed once with `npx playwright install chro
 - **End to end** (`apps/api/test/app.e2e-spec.ts`): the whole API against real MongoDB and MinIO,
   using a separate `vidshelf_e2e` database and `vidshelf-e2e` bucket. It covers:
   - the cookie flags;
-  - rotation and family revocation;
+  - rotation, the one-time two-tab grace answer, and family revocation;
   - MinIO rejecting a tampered upload;
   - range requests on the stream URL;
   - likes, views and permissions.

@@ -22,7 +22,7 @@ test('sign up, upload a video, watch it play, find it in search', async ({ page 
   await page.getByRole('button', { name: 'Create account' }).click();
   await expect(page.getByTestId('current-user')).toContainText(username);
 
-  await page.getByRole('link', { name: 'Upload' }).click();
+  await page.getByRole('link', { name: 'Upload', exact: true }).click();
   await page.locator('input[type=file]').setInputFiles(FIXTURE);
   await expect(page.getByAltText('Poster frame')).toBeVisible(); // thumbnail grabbed in-browser
   await page.getByLabel('Title').fill(title);

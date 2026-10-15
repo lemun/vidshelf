@@ -1,11 +1,11 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { HydratedDocument, Types } from 'mongoose';
+import { HydratedDocument, SchemaTypes, Types } from 'mongoose';
 
 @Schema({ timestamps: true })
 export class Video {
   _id!: Types.ObjectId;
 
-  @Prop({ type: Types.ObjectId, ref: 'User', required: true, index: true })
+  @Prop({ type: SchemaTypes.ObjectId, ref: 'User', required: true, index: true })
   owner!: Types.ObjectId;
 
   @Prop({ required: true, trim: true, maxlength: 120 })
@@ -37,7 +37,7 @@ export class Video {
   likes!: number;
 
   /** Who liked it. Never returned to clients; used for idempotent like/unlike and `likedByMe`. */
-  @Prop({ type: [{ type: Types.ObjectId, ref: 'User' }], default: [], select: false })
+  @Prop({ type: [{ type: SchemaTypes.ObjectId, ref: 'User' }], default: [], select: false })
   likedBy!: Types.ObjectId[];
 
   createdAt!: Date;
