@@ -1,35 +1,16 @@
-import { ValidationPipe } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import { json } from 'express';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
+import { configureApp } from './app.setup';
+import type { Env } from './config/env';
 
 async function bootstrap() {
-  const port = process.env.PORT || 3000;
-  const app = await NestFactory.create(AppModule);
-
-  app.enableCors({
-    origin: 'http://localhost:4000', // Your React app URL
-    credentials: true, // Allow cookies
-  });
-  app.use(json());
-
-  const config = new DocumentBuilder()
-    .setTitle('Vidshelf API')
-    .setDescription('Vidshelf API Documentation')
-    .setVersion('1.0')
-    .addBearerAuth({
-      type: 'http',
-      scheme: 'bearer',
-      bearerFormat: 'JWT',
-      name: 'Authorization',
-      in: 'header',
-    })
-    .build();
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('docs', app, document);
-
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true, }));
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  configureApp(app);
+  app.enableShutdownHooks();
+  const port = app.get(ConfigService<Env, true>).get('PORT', { infer: true });
   await app.listen(port);
 }
+
 void bootstrap();

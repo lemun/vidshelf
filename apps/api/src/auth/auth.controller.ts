@@ -1,67 +1,145 @@
-import { Body, Controller, Get, Post, Req, UseGuards } from "@nestjs/common";
-import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
-import { Request } from 'express';
-import { Public } from "../common/decorators";
-import { JwtAuthGuard } from "../common/guards/jwt-auth.guard";
-import { AuthService } from "./auth.service";
-import { LoginDto } from "./dto/login.dto";
-import { RegisterDto } from "./dto/register.dto";
-import { JwtRefreshGuard } from "./guards/jwt-refresh.guard";
-import { RequestUser } from "./interfaces/request-user";
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Post,
+  Req,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import {
+  ApiBearerAuth,
+  ApiCookieAuth,
+  ApiNoContentResponse,
+  ApiOperation,
+  ApiTags,
+  ApiTooManyRequestsResponse,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
+import { ThrottlerGuard } from '@nestjs/throttler';
+import type { CookieOptions, Request, Response } from 'express';
+import type { AuthUser } from '../common/auth-user';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { Public } from '../common/decorators/public.decorator';
+import type { Env } from '../config/env';
+import { AuthService } from './auth.service';
+import type { AuthResponse, ClientMeta, Session } from './auth.types';
+import { LoginDto } from './dto/login.dto';
+import { RegisterDto } from './dto/register.dto';
 
+export const REFRESH_COOKIE = 'vidshelf_rt';
+const REFRESH_COOKIE_PATH = '/api/auth';
 
 @ApiTags('Auth')
+@ApiTooManyRequestsResponse({
+  description: 'Rate limit exceeded (AUTH_RATE_LIMIT per minute per IP)',
+})
+@UseGuards(ThrottlerGuard)
 @Controller('auth')
 export class AuthController {
-    constructor(private readonly auth: AuthService) {}
+  constructor(
+    private readonly auth: AuthService,
+    private readonly config: ConfigService<Env, true>,
+  ) {}
 
-    @Public()
-    @Post('register')
-    @ApiOperation({ summary: 'Register a new user' })
-    register(@Body() dto: RegisterDto) {
-        return this.auth.register(dto);
-    }
+  @Public()
+  @Post('register')
+  @ApiOperation({
+    summary: 'Create an account; returns an access token and sets the refresh cookie',
+  })
+  async register(
+    @Body() dto: RegisterDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<AuthResponse> {
+    return this.respond(res, await this.auth.register(dto, meta(req)));
+  }
 
-    @Public()
-    @Post('login')
-    @ApiOperation({ summary: 'Login and get access/refresh tokens' })
-    login(@Body() dto: LoginDto) {
-        return this.auth.login(dto);
-    }
+  @Public()
+  @Post('login')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Sign in; returns an access token and sets the refresh cookie' })
+  @ApiUnauthorizedResponse({ description: 'Invalid email or password' })
+  async login(
+    @Body() dto: LoginDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<AuthResponse> {
+    return this.respond(res, await this.auth.login(dto, meta(req)));
+  }
 
-    @ApiBearerAuth()
-    @UseGuards(JwtAuthGuard)
-    @Post('logout')
-    @ApiOperation({ summary: 'Logout and revoke refresh token' })
-    logout(@Req() req: Request & { user: RequestUser }) {
-        if (!req.user) {
-            throw new Error('User not found in request');
-        }
-        return this.auth.logout(req.user.userId);
+  @Public()
+  @Post('refresh')
+  @HttpCode(HttpStatus.OK)
+  @ApiCookieAuth(REFRESH_COOKIE)
+  @ApiOperation({ summary: 'Rotate the refresh cookie and get a new access token' })
+  @ApiUnauthorizedResponse({
+    description: 'Missing, invalid, expired or already-used refresh token',
+  })
+  async refresh(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<AuthResponse> {
+    try {
+      return this.respond(res, await this.auth.refresh(readRefreshCookie(req), meta(req)));
+    } catch (error) {
+      res.clearCookie(REFRESH_COOKIE, this.cookieOptions());
+      throw error;
     }
+  }
 
-    @Public()
-    @UseGuards(JwtRefreshGuard)
-    @Post('refresh')
-    @ApiOperation({ summary: 'Rotate refresh token using JwtRefreshGuard' })
-    refresh(@Req() req: Request & { user: RequestUser }) {
-        if (!req.user) {
-            throw new Error('User not found in request');
-        }
-        if (!req.user.refreshToken) {
-            throw new Error('Refresh token not found in request');
-        }
-        return this.auth.rotateRefreshToken(req.user.refreshToken);
-    }
+  @Public()
+  @Post('logout')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiCookieAuth(REFRESH_COOKIE)
+  @ApiOperation({ summary: 'End the session of the refresh cookie and clear the cookie' })
+  @ApiNoContentResponse()
+  async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response): Promise<void> {
+    await this.auth.logout(readRefreshCookie(req));
+    res.clearCookie(REFRESH_COOKIE, this.cookieOptions());
+  }
 
-    @ApiBearerAuth()
-    @UseGuards(JwtAuthGuard)
-    @Get('me')
-    @ApiOperation({ summary: 'Get current user profile' })
-    me(@Req() req: Request & { user: RequestUser }) {
-        if (!req.user) {
-            throw new Error('User not found in request');
-        }
-        return this.auth.getProfile(req.user.userId);
+  @Get('me')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'The signed-in user' })
+  me(@CurrentUser() user: AuthUser) {
+    return this.auth.me(user.userId);
+  }
+
+  private respond(res: Response, session: Session): AuthResponse {
+    // No refresh token means a concurrent refresh already set the current cookie: keep it.
+    if (session.refreshToken) {
+      res.cookie(REFRESH_COOKIE, session.refreshToken, {
+        ...this.cookieOptions(),
+        expires: session.refreshTokenExpiresAt,
+      });
     }
+    return {
+      user: session.user,
+      accessToken: session.accessToken,
+      accessTokenExpiresIn: session.accessTokenExpiresIn,
+    };
+  }
+
+  private cookieOptions(): CookieOptions {
+    return {
+      httpOnly: true,
+      sameSite: 'strict',
+      secure: this.config.get('COOKIE_SECURE', { infer: true }),
+      path: REFRESH_COOKIE_PATH,
+    };
+  }
+}
+
+function readRefreshCookie(req: Request): string | undefined {
+  const cookies = req.cookies as Record<string, unknown> | undefined;
+  const value = cookies?.[REFRESH_COOKIE];
+  return typeof value === 'string' && value !== '' ? value : undefined;
+}
+
+function meta(req: Request): ClientMeta {
+  return { ip: req.ip, userAgent: req.get('user-agent') };
 }

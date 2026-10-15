@@ -1,94 +1,111 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
-import { ParseObjectIdPipe } from '../common/pipes/parse-objectid.pipe';
-
-import { FileInterceptor } from '@nestjs/platform-express';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+  Put,
+  Query,
+} from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiForbiddenResponse,
+  ApiNotFoundResponse,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
+import type { AuthUser } from '../common/auth-user';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { Public } from '../common/decorators/public.decorator';
+import { ParseObjectIdPipe } from '../common/pipes/parse-object-id.pipe';
+import { CreateUploadDto } from './dto/create-upload.dto';
 import { CreateVideoDto } from './dto/create-video.dto';
+import { ListVideosQuery } from './dto/list-videos.query';
 import { UpdateVideoDto } from './dto/update-video.dto';
 import { VideosService } from './videos.service';
-
 
 @ApiTags('Videos')
 @Controller('videos')
 export class VideosController {
-    constructor(private readonly videos: VideosService) {}
+  constructor(private readonly videos: VideosService) {}
 
-    @Post('upload')
-    @ApiOperation({ summary: 'Upload a video file' })
-    @UseInterceptors(FileInterceptor('file'))
-    async upload(@UploadedFile() file: Express.Multer.File) {
-        return this.videos.uploadFile(file);
-    }
+  @Post('uploads')
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get a presigned POST to upload a video or thumbnail directly to MinIO',
+    description:
+      'POST a multipart form to `url` with every entry of `fields` followed by the file as `file`. Then call POST /videos with the returned `key`.',
+  })
+  createUpload(@CurrentUser() user: AuthUser, @Body() dto: CreateUploadDto) {
+    return this.videos.createUploadTarget(user.userId, dto);
+  }
 
-    @ApiBearerAuth()
-    @UseGuards(JwtAuthGuard)
-    @Post()
-    @ApiOperation({ summary: 'Create a new video (metadata)' })
-    create(@Body() dto: CreateVideoDto, @Req() req: any) {
-        return this.videos.create(req.user.userId, dto);
-    }
+  @Post()
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Publish an uploaded video' })
+  create(@CurrentUser() user: AuthUser, @Body() dto: CreateVideoDto) {
+    return this.videos.create(user.userId, dto);
+  }
 
-    @ApiBearerAuth()
-    @UseGuards(JwtAuthGuard)
-    @Patch(':id')
-    @ApiOperation({ summary: 'Update a video metadata (self)' })
-    update(
-        @Param('id', ParseObjectIdPipe) id: string,
-        @Body() dto: UpdateVideoDto,
-        @Req() req: any,
-    ) {
-        return this.videos.update(id, dto, req.user.userId);
-    }
+  @Public()
+  @Get()
+  @ApiOperation({ summary: 'List videos, newest first, or by relevance when `q` is given' })
+  list(@Query() query: ListVideosQuery) {
+    return this.videos.list(query);
+  }
 
-    @ApiBearerAuth()
-    @UseGuards(JwtAuthGuard)
-    @Delete(':id')
-    @ApiOperation({ summary: 'Delete a video (self or admin)' })
-    remove(@Param('id', ParseObjectIdPipe) id: string, @Req() req: any) {
-        return this.videos.remove(id, req.user.userId);
-    }
+  @Public()
+  @Get(':id')
+  @ApiOperation({ summary: 'A video with a presigned stream URL (valid for one hour)' })
+  @ApiNotFoundResponse()
+  findOne(@Param('id', ParseObjectIdPipe) id: string, @CurrentUser() user?: AuthUser) {
+    return this.videos.findOne(id, user?.userId);
+  }
 
-    @Get()
-    @ApiOperation({ summary: 'Get a video by id' })
-    findById(@Param('id', ParseObjectIdPipe) id: string) {
-        return this.videos.findById(id);
-    }
+  @Patch(':id')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Edit title or description (uploader only)' })
+  @ApiForbiddenResponse()
+  update(
+    @Param('id', ParseObjectIdPipe) id: string,
+    @CurrentUser() user: AuthUser,
+    @Body() dto: UpdateVideoDto,
+  ) {
+    return this.videos.update(id, user.userId, dto);
+  }
 
-    @Post(':id/views')
-    @ApiOperation({ summary: 'Register a view' })
-    registerView(@Param('id', ParseObjectIdPipe) id: string, @Req() req: any) {
-        return this.videos.incrementView(id, req.user?.userId ?? null);
-    }
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Delete a video and its stored files (uploader only)' })
+  @ApiForbiddenResponse()
+  remove(@Param('id', ParseObjectIdPipe) id: string, @CurrentUser() user: AuthUser) {
+    return this.videos.remove(id, user.userId);
+  }
 
-    @ApiBearerAuth()
-    @UseGuards(JwtAuthGuard)
-    @Post(':id/likes')
-    @ApiOperation({ summary: 'Register a like' })
-    like(@Param('id', ParseObjectIdPipe) id: string, @Req() req: any) {
-        return this.videos.like(id, req.user.userId);
-    }
+  @Public()
+  @Post(':id/views')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Count a play' })
+  registerView(@Param('id', ParseObjectIdPipe) id: string) {
+    return this.videos.registerView(id);
+  }
 
-    @ApiBearerAuth()
-    @UseGuards(JwtAuthGuard)
-    @Post(':id/dislikes')
-    @ApiOperation({ summary: 'Register a dislike' })
-    dislike(@Param('id', ParseObjectIdPipe) id: string, @Req() req: any) {
-        return this.videos.dislike(id, req.user.userId);
-    }
+  @Put(':id/like')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Like (idempotent)' })
+  like(@Param('id', ParseObjectIdPipe) id: string, @CurrentUser() user: AuthUser) {
+    return this.videos.like(id, user.userId);
+  }
 
-    @ApiBearerAuth()
-    @UseGuards(JwtAuthGuard)
-    @Delete(':id/reaction')
-    @ApiOperation({ summary: 'Clear like/dislike' })
-    clearReaction(@Param('id', ParseObjectIdPipe) id:string, @Req() req: any) {
-        return this.videos.clearReaction(id, req.user.userId);
-    }
-
-    @Get(':id/stats')
-    @ApiOperation({ summary: 'Get public stats for a video' })
-    stats(@Param('id', ParseObjectIdPipe) id: string) {
-        return this.videos.getStats(id);
-    }
+  @Delete(':id/like')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Remove your like (idempotent)' })
+  unlike(@Param('id', ParseObjectIdPipe) id: string, @CurrentUser() user: AuthUser) {
+    return this.videos.unlike(id, user.userId);
+  }
 }

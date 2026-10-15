@@ -1,24 +1,23 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
-import { ACCESS_TOKEN_SECRET, JWT_ACCESS_STRATEGY } from '../interfaces/constants';
-import { JwtPayload } from '../interfaces/jwt-payload';
+import type { AuthUser } from '../../common/auth-user';
+import type { Env } from '../../config/env';
+import type { AccessTokenPayload } from '../auth.types';
 
 @Injectable()
-export class JwtStrategy extends PassportStrategy(Strategy, JWT_ACCESS_STRATEGY) {
-    constructor() {
-        super({
-            jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
-            ignoreExpiration: false,
-            secretOrKey: ACCESS_TOKEN_SECRET
-        })
-    }
+export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
+  constructor(config: ConfigService<Env, true>) {
+    super({
+      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      ignoreExpiration: false,
+      secretOrKey: config.get('JWT_ACCESS_SECRET', { infer: true }),
+      algorithms: ['HS256'],
+    });
+  }
 
-    validate(payload: JwtPayload) {
-        return {
-            userId: payload.sub,
-            email: payload.email,
-            username: payload.username
-        };
-    }
+  validate(payload: AccessTokenPayload): AuthUser {
+    return { userId: payload.sub, username: payload.username };
+  }
 }

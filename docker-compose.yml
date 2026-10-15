@@ -1,0 +1,105 @@
+# First `scripts/gen-env.sh` (writes .env with random secrets), then `docker compose up --build`
+# and open http://localhost:8080. Secrets have no defaults: compose stops with an error if .env
+# (or the shell) does not set them. Every port binds to 127.0.0.1 only.
+name: vidshelf
+
+# Pinned by digest (multi-arch index: linux/amd64 + linux/arm64), so the tag cannot be moved under us.
+x-minio-image: &minio-image pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
+
+services:
+  mongo:
+    image: mongo:8.2
+    ports:
+      - '127.0.0.1:27017:27017'
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', 'db.adminCommand("ping").ok']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    # Community-maintained MinIO build: upstream stopped publishing images in late 2025.
+    image: *minio-image
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?run scripts/gen-env.sh to create .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?run scripts/gen-env.sh to create .env}
+    ports:
+      - '127.0.0.1:9000:9000' # S3 API: browsers upload to and stream from here
+      - '127.0.0.1:9001:9001' # web console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio-init:
+    image: *minio-image
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?run scripts/gen-env.sh to create .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?run scripts/gen-env.sh to create .env}
+      MINIO_BUCKET: ${MINIO_BUCKET:-vidshelf}
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" && mc mb --ignore-existing "local/$$MINIO_BUCKET"
+    restart: 'no'
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    depends_on:
+      mongo:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      PORT: 3000
+      MONGO_URI: mongodb://mongo:27017/vidshelf
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?run scripts/gen-env.sh to create .env}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?run scripts/gen-env.sh to create .env}
+      JWT_ACCESS_TTL_SECONDS: ${JWT_ACCESS_TTL_SECONDS:-900}
+      JWT_REFRESH_TTL_SECONDS: ${JWT_REFRESH_TTL_SECONDS:-604800}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-12}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      AUTH_RATE_LIMIT: ${AUTH_RATE_LIMIT:-20}
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_USE_SSL: 'false'
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?run scripts/gen-env.sh to create .env}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?run scripts/gen-env.sh to create .env}
+      MINIO_BUCKET: ${MINIO_BUCKET:-vidshelf}
+      MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-http://localhost:9000}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-200}
+    ports:
+      - '127.0.0.1:3000:3000'
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - '127.0.0.1:8080:80'
+
+volumes:
+  mongo-data:
+  minio-data:
