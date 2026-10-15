@@ -1,0 +1,103 @@
+# One command: `docker compose up --build`, then open http://localhost:8080
+# Defaults are for local use only (see .env.example); override any of them via the shell or a .env file.
+name: vidshelf
+
+x-minio-image: &minio-image pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+
+services:
+  mongo:
+    image: mongo:8.2
+    ports:
+      - '127.0.0.1:27017:27017'
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', 'db.adminCommand("ping").ok']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    # Community-maintained MinIO build: upstream stopped publishing images in late 2025.
+    image: *minio-image
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - '127.0.0.1:9000:9000' # S3 API: browsers upload to and stream from here
+      - '127.0.0.1:9001:9001' # web console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio-init:
+    image: *minio-image
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-vidshelf}
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" && mc mb --ignore-existing "local/$$MINIO_BUCKET"
+    restart: 'no'
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    depends_on:
+      mongo:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      PORT: 3000
+      MONGO_URI: mongodb://mongo:27017/vidshelf
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-local-dev-access-secret-change-me-0123456789}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-local-dev-refresh-secret-change-me-0123456789}
+      JWT_ACCESS_TTL_SECONDS: ${JWT_ACCESS_TTL_SECONDS:-900}
+      JWT_REFRESH_TTL_SECONDS: ${JWT_REFRESH_TTL_SECONDS:-604800}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-10}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      AUTH_RATE_LIMIT: ${AUTH_RATE_LIMIT:-20}
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_USE_SSL: 'false'
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-vidshelf}
+      MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-http://localhost:9000}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-200}
+    ports:
+      - '127.0.0.1:3000:3000'
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - '127.0.0.1:8080:80'
+
+volumes:
+  mongo-data:
+  minio-data:
