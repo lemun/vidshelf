@@ -1,9 +1,9 @@
-import js from '@eslint/js'
-import globals from 'globals'
-import reactHooks from 'eslint-plugin-react-hooks'
-import reactRefresh from 'eslint-plugin-react-refresh'
-import tseslint from 'typescript-eslint'
-import { defineConfig, globalIgnores } from 'eslint/config'
+import js from '@eslint/js';
+import reactHooks from 'eslint-plugin-react-hooks';
+import reactRefresh from 'eslint-plugin-react-refresh';
+import { defineConfig, globalIgnores } from 'eslint/config';
+import globals from 'globals';
+import tseslint from 'typescript-eslint';
 
 export default defineConfig([
   globalIgnores(['dist']),
@@ -11,13 +11,20 @@ export default defineConfig([
     files: ['**/*.{ts,tsx}'],
     extends: [
       js.configs.recommended,
-      tseslint.configs.recommended,
-      reactHooks.configs['recommended-latest'],
+      tseslint.configs.strictTypeChecked,
+      reactHooks.configs.flat['recommended-latest'],
       reactRefresh.configs.vite,
     ],
     languageOptions: {
-      ecmaVersion: 2020,
+      ecmaVersion: 2022,
       globals: globals.browser,
+      parserOptions: {
+        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+    rules: {
+      '@typescript-eslint/restrict-template-expressions': ['error', { allowNumber: true }],
     },
   },
-])
+]);

@@ -1,1 +1,5 @@
-@import "tailwindcss";
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
