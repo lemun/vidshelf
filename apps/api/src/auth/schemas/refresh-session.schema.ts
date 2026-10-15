@@ -31,6 +31,17 @@ export class RefreshSession {
   @Prop({ type: Date, default: null })
   revokedAt!: Date | null;
 
+  /** Hash of the token the last rotation consumed, and when: for the concurrent-refresh grace. */
+  @Prop({ type: String, default: null })
+  previousTokenHash!: string | null;
+
+  @Prop({ type: Date, default: null })
+  rotatedAt!: Date | null;
+
+  /** Set when the grace window has been used for the current rotation (it can be used once). */
+  @Prop({ type: Date, default: null })
+  graceUsedAt!: Date | null;
+
   @Prop() userAgent?: string;
   @Prop() ip?: string;
 }

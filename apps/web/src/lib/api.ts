@@ -13,13 +13,36 @@ export class ApiError extends Error {
 type SessionListener = (session: AuthResponse | null) => void;
 
 let accessToken: string | null = null;
-let refreshInFlight: Promise<AuthResponse | null> | null = null;
+/**
+ * Bumped whenever the session is replaced from outside a refresh (sign-in, sign-up, sign-out). A
+ * refresh that started under an older epoch is cancelled, and its result is dropped if it still
+ * arrives, so a late refresh response can never sign a signed-out user back in (or replace a
+ * newer sign-in).
+ */
+let authEpoch = 0;
+let refreshInFlight: { promise: Promise<AuthResponse | null>; controller: AbortController } | null =
+  null;
 const listeners = new Set<SessionListener>();
 
-/** The access token lives only in memory; the refresh token is an httpOnly cookie. */
-export function setSession(session: AuthResponse | null): void {
+function applySession(session: AuthResponse | null): void {
   accessToken = session?.accessToken ?? null;
   for (const listener of listeners) listener(session);
+}
+
+/**
+ * Replaces the session after sign-in, sign-up or sign-out, and cancels any refresh in flight.
+ * The access token lives only in memory; the refresh token is an httpOnly cookie.
+ */
+export function setSession(session: AuthResponse | null): void {
+  authEpoch += 1;
+  refreshInFlight?.controller.abort();
+  refreshInFlight = null;
+  applySession(session);
+}
+
+/** Forgets the in-flight refresh, unless a newer one has replaced it already. */
+function finishRefresh(controller: AbortController): void {
+  if (refreshInFlight?.controller === controller) refreshInFlight = null;
 }
 
 export function onSessionChange(listener: SessionListener): () => void {
@@ -29,33 +52,41 @@ export function onSessionChange(listener: SessionListener): () => void {
 
 /**
  * Exchanges the refresh cookie for a new session. Refresh tokens are single-use and reuse revokes
- * every session, so concurrent refreshes must not race: calls share one in-flight request, and
+ * every session, so refreshes should not race: calls in one tab share one in-flight request, and
  * the Web Locks API serialises refreshes across tabs (the next tab then sends the new cookie).
+ * Where Web Locks is missing, two tabs can still send the same cookie at once; the API answers
+ * the second one inside a short grace window instead of treating it as reuse.
  */
 export function refreshSession(): Promise<AuthResponse | null> {
-  refreshInFlight ??= (async () => {
+  if (refreshInFlight) return refreshInFlight.promise;
+  const epoch = authEpoch;
+  const controller = new AbortController();
+  const promise = (async () => {
     try {
       const run = async () => {
         const res = await fetch('/api/auth/refresh', {
           method: 'POST',
           credentials: 'same-origin',
+          signal: controller.signal,
         });
         return res.ok ? ((await res.json()) as AuthResponse) : null;
       };
       const session =
         typeof navigator !== 'undefined' && 'locks' in navigator
-          ? await navigator.locks.request('vidshelf-refresh', run)
+          ? await navigator.locks.request('vidshelf-refresh', { signal: controller.signal }, run)
           : await run();
-      setSession(session);
+      if (epoch !== authEpoch) return null; // signed in or out meanwhile: drop the result
+      applySession(session);
       return session;
     } catch {
-      setSession(null);
+      if (epoch === authEpoch) applySession(null);
       return null;
     } finally {
-      refreshInFlight = null;
+      finishRefresh(controller);
     }
   })();
-  return refreshInFlight;
+  refreshInFlight = { promise, controller };
+  return promise;
 }
 
 interface RequestOptions {

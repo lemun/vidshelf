@@ -95,7 +95,7 @@ export class AuthController {
   @Post('logout')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiCookieAuth(REFRESH_COOKIE)
-  @ApiOperation({ summary: 'Revoke the current refresh token and clear the cookie' })
+  @ApiOperation({ summary: 'End the session of the refresh cookie and clear the cookie' })
   @ApiNoContentResponse()
   async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response): Promise<void> {
     await this.auth.logout(readRefreshCookie(req));
@@ -110,10 +110,13 @@ export class AuthController {
   }
 
   private respond(res: Response, session: Session): AuthResponse {
-    res.cookie(REFRESH_COOKIE, session.refreshToken, {
-      ...this.cookieOptions(),
-      expires: session.refreshTokenExpiresAt,
-    });
+    // No refresh token means a concurrent refresh already set the current cookie: keep it.
+    if (session.refreshToken) {
+      res.cookie(REFRESH_COOKIE, session.refreshToken, {
+        ...this.cookieOptions(),
+        expires: session.refreshTokenExpiresAt,
+      });
+    }
     return {
       user: session.user,
       accessToken: session.accessToken,

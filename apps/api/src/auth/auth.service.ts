@@ -15,7 +15,13 @@ import type { Env } from '../config/env';
 import { toPublicUser } from '../users/public-user';
 import type { UserDocument } from '../users/schemas/user.schema';
 import { UsersService } from '../users/users.service';
-import type { AccessTokenPayload, ClientMeta, RefreshTokenPayload, Session } from './auth.types';
+import type {
+  AccessTokenPayload,
+  ClientMeta,
+  IssuedSession,
+  RefreshTokenPayload,
+  Session,
+} from './auth.types';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { PASSWORD_TOO_LONG_MESSAGE, passwordFitsBcrypt } from './password';
@@ -76,12 +82,14 @@ export class AuthService {
    *
    * The presented token must be the current token of a live session. The check and the storing of
    * the replacement are ONE conditional update of the session document, so the token works exactly
-   * once, and a revocation that lands at any point before that update makes it fail: the
-   * replacement is then never stored and never returned.
+   * once, and a revocation (reuse detection or logout) that lands at any point before that update
+   * makes it fail: the replacement is then never stored and never returned.
    *
-   * Presenting a token from an older generation of its session means it was already spent, so it
-   * leaked (or a client raced itself): that session and every other active session of the user are
-   * revoked.
+   * Two tabs share one cookie, so they can send the same token at once. The loser presents the
+   * token the winner has just consumed. If that happens within REFRESH_GRACE_MS of the rotation,
+   * once, on a live session, it gets a new access token and no refresh token (the winner's response
+   * sets the cookie). Any other spent token means it leaked: that session and every other active
+   * session of the user are revoked.
    */
   async refresh(refreshToken: string | undefined, meta: ClientMeta = {}): Promise<Session> {
     if (!refreshToken) {
@@ -94,42 +102,89 @@ export class AuthService {
       throw invalidRefreshToken();
     }
     const next = await this.signSession(user, payload.sid, payload.gen + 1);
+    const tokenHash = hashToken(refreshToken);
+    const now = new Date();
 
     const rotated = await this.sessions
       .updateOne(
         {
           _id: payload.sid,
           user: payload.sub,
-          tokenHash: hashToken(refreshToken),
+          tokenHash,
           generation: payload.gen,
           revokedAt: null,
-          expiresAt: { $gt: new Date() },
+          expiresAt: { $gt: now },
         },
         {
           $set: {
             tokenHash: hashToken(next.refreshToken),
             generation: payload.gen + 1,
             expiresAt: next.refreshTokenExpiresAt,
+            previousTokenHash: tokenHash,
+            rotatedAt: now,
+            graceUsedAt: null,
             userAgent: meta.userAgent?.slice(0, 256),
             ip: meta.ip,
           },
         },
       )
       .exec();
-
-    if (rotated.matchedCount !== 1) {
-      await this.revokeAllIfReused(payload);
-      throw invalidRefreshToken();
+    if (rotated.matchedCount === 1) {
+      return next;
     }
-    return next;
+
+    // Lost a race with a concurrent refresh of the same token? Also one conditional update, so
+    // it fails if the session is revoked first, and can be used once per rotation.
+    const graced = await this.sessions
+      .updateOne(
+        {
+          _id: payload.sid,
+          user: payload.sub,
+          previousTokenHash: tokenHash,
+          generation: payload.gen + 1,
+          rotatedAt: { $gt: new Date(now.getTime() - REFRESH_GRACE_MS) },
+          graceUsedAt: null,
+          revokedAt: null,
+          expiresAt: { $gt: now },
+        },
+        { $set: { graceUsedAt: now } },
+      )
+      .exec();
+    if (graced.matchedCount === 1) {
+      // Access token only: the winning refresh's response sets the cookie.
+      return {
+        user: next.user,
+        accessToken: next.accessToken,
+        accessTokenExpiresIn: next.accessTokenExpiresIn,
+      };
+    }
+
+    await this.revokeAllIfReused(payload, tokenHash, now);
+    throw invalidRefreshToken();
   }
 
-  /** Ends the session whose current refresh token this is. Always succeeds (idempotent). */
+  /**
+   * Ends the session the presented refresh token belongs to. The token is identified by its
+   * signature, session id and generation, not by looking up its hash, so logout still works when
+   * a concurrent refresh has just replaced it: the current token or the one just before it are
+   * both accepted. Anything else is ignored. Always succeeds (idempotent).
+   */
   async logout(refreshToken: string | undefined): Promise<void> {
     if (!refreshToken) return;
+    let payload: RefreshTokenPayload;
+    try {
+      payload = await this.verifyRefreshToken(refreshToken);
+    } catch {
+      return;
+    }
     await this.sessions
       .updateOne(
-        { tokenHash: hashToken(refreshToken), revokedAt: null },
+        {
+          _id: payload.sid,
+          user: payload.sub,
+          generation: { $gte: payload.gen, $lte: payload.gen + 1 },
+          revokedAt: null,
+        },
         { $set: { revokedAt: new Date() } },
       )
       .exec();
@@ -151,7 +206,7 @@ export class AuthService {
   }
 
   /** Starts a new refresh session (token family) for a fresh sign-in. */
-  private async issueSession(user: UserDocument, meta: ClientMeta): Promise<Session> {
+  private async issueSession(user: UserDocument, meta: ClientMeta): Promise<IssuedSession> {
     const sessionId = new Types.ObjectId();
     const session = await this.signSession(user, sessionId.toString(), 0);
     await this.sessions.create({
@@ -167,7 +222,7 @@ export class AuthService {
   }
 
   /** Signs an access token and a refresh token for generation `gen` of session `sid`. */
-  private async signSession(user: UserDocument, sid: string, gen: number): Promise<Session> {
+  private async signSession(user: UserDocument, sid: string, gen: number): Promise<IssuedSession> {
     const accessTtl = this.config.get('JWT_ACCESS_TTL_SECONDS', { infer: true });
     const refreshTtl = this.config.get('JWT_REFRESH_TTL_SECONDS', { infer: true });
 
@@ -226,14 +281,36 @@ export class AuthService {
     return { sub, sid, gen: gen as number, jti };
   }
 
-  /** A validly signed token from an older generation of its session was already spent: revoke. */
-  private async revokeAllIfReused(payload: RefreshTokenPayload): Promise<void> {
+  /**
+   * A validly signed token from an older generation of its session was already spent: revoke
+   * every session of the user. Exception: the token consumed by the session's last rotation,
+   * presented within the grace window after the session was ended (a tab that raced a sign-out);
+   * that only fails.
+   */
+  private async revokeAllIfReused(
+    payload: RefreshTokenPayload,
+    tokenHash: string,
+    now: Date,
+  ): Promise<void> {
     const session = await this.sessions.findById(payload.sid).exec();
-    if (session && session.user.toString() === payload.sub && payload.gen < session.generation) {
-      this.logger.warn(`Refresh token reuse detected for user ${payload.sub}`);
-      await this.revokeAllForUser(payload.sub);
+    if (!session || session.user.toString() !== payload.sub || payload.gen >= session.generation) {
+      return;
     }
+    const racedSignOut =
+      session.revokedAt !== null &&
+      session.previousTokenHash === tokenHash &&
+      session.rotatedAt !== null &&
+      session.rotatedAt.getTime() > now.getTime() - REFRESH_GRACE_MS;
+    if (racedSignOut) return;
+    this.logger.warn(`Refresh token reuse detected for user ${payload.sub}`);
+    await this.revokeAllForUser(payload.sub);
   }
 }
+
+/**
+ * How long after a rotation the token it consumed may still be presented once (by another tab
+ * that sent the same cookie at the same time) without being treated as reuse.
+ */
+export const REFRESH_GRACE_MS = 10_000;
 
 const invalidRefreshToken = () => new UnauthorizedException('Invalid refresh token');

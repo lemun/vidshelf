@@ -92,14 +92,24 @@ sequenceDiagram
     hash". So each refresh token works once.
   - Presenting a token from an older generation of its session (one that was already used) is
     treated as theft: that session and every other active session of the user are revoked.
-  - Revoking is also a single-document update, so it cannot be outrun by a refresh that is in
-    flight at the same moment: that refresh either stored its replacement first (and the
-    replacement is revoked with the session), or it finds the session revoked and fails without
-    returning a token. `auth.service.spec.ts` interleaves the two to check this.
+  - **Two-tab grace window.** Tabs share one cookie, so two tabs can refresh with the same token
+    at once (the web app serialises refreshes with the Web Locks API, but not every client has
+    it). The token the last rotation consumed is therefore accepted again for 10 seconds after
+    that rotation, once, while the session is live: the answer is a new access token and no new
+    cookie, because the winning request already set it. Outside that window, a second time, or
+    any older token, it is reuse as above. The cost: a thief replaying a just-rotated token
+    within those 10 seconds gets one access token (15 minutes) instead of triggering revocation.
+  - **Sign-out** ends the session the cookie's token belongs to, identified by the token's
+    signature, session id and generation (the current token or the one just replaced), not by
+    looking up its hash. So it still works if a refresh replaced the token a moment earlier.
+  - Revoking (reuse or sign-out) is also a single-document update, so it cannot be outrun by a
+    refresh in flight at the same moment: that refresh either stored its replacement first (and
+    the replacement is revoked with the session), or it finds the session revoked and fails
+    without returning a token. `auth.service.spec.ts` interleaves the two to check this.
+  - In the web app, signing out cancels any refresh in flight and ignores its response if it
+    still arrives (an "auth epoch" counter), so a late refresh cannot sign the user back in.
   - Access tokens that were already issued stay valid until they expire (at most 15 minutes).
     Sessions started by a new sign-in after a revocation are not affected.
-  - Because tokens are single-use, the web client must never race itself. Concurrent refreshes
-    share one request, and the Web Locks API serializes refreshes across tabs.
   - Every route requires a token unless it is marked `@Public()`. Public routes still read a
     valid token if one is sent, which is how `likedByMe` works for signed-in viewers.
   - `/api/auth/*` is rate limited per IP.
@@ -186,12 +196,15 @@ The browser test needs Chromium installed once with `npx playwright install chro
 - **Unit tests:**
   - `auth.service.spec.ts`: registration (including the 72-byte limit), login, refresh rotation,
     reuse detection, expiry, forged tokens and logout, run against an in-memory session store.
-    The "refresh racing reuse detection" tests pause a legitimate refresh while its replacement
-    token is being minted, and again right before it is stored, run the reuse detection in that
-    gap, and check that the replacement never works.
+    Further tests cover the two-tab grace window and sign-out racing a refresh. The "refresh
+    racing reuse detection" tests pause a legitimate refresh while its replacement token is being
+    minted, and again right before it is stored, run the reuse detection in that gap, and check
+    that the replacement never works.
   - `videos.service.spec.ts`: upload policy limits, key ownership, publish checks, search and
     sort, ownership on edit and delete, atomic likes, views.
   - `env.spec.ts`: environment validation, including the bcrypt cost floor.
+  - `apps/web/src/lib/api.test.ts` (Vitest): a refresh still in flight at sign-out, or at a new
+    sign-in, is cancelled and its late response is ignored.
 - **HTTP layer** (`http.spec.ts`): the real controllers, global guard, validation pipe, refresh
   cookie and Swagger document, with mocked services.
 - **End to end** (`apps/api/test/app.e2e-spec.ts`): the whole API against real MongoDB and MinIO,

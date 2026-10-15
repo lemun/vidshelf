@@ -25,8 +25,15 @@ export interface Session {
   user: PublicUser;
   accessToken: string;
   accessTokenExpiresIn: number;
-  refreshToken: string;
-  refreshTokenExpiresAt: Date;
+  /**
+   * Absent only for a refresh answered inside the concurrent-refresh grace window: the request that
+   * rotated the token has already set the new cookie, so this response leaves the cookie alone.
+   */
+  refreshToken?: string;
+  refreshTokenExpiresAt?: Date;
 }
+
+/** A session with a newly minted refresh token (sign-in, sign-up and a real rotation). */
+export type IssuedSession = Session & { refreshToken: string; refreshTokenExpiresAt: Date };
 
 export type AuthResponse = Omit<Session, 'refreshToken' | 'refreshTokenExpiresAt'>;

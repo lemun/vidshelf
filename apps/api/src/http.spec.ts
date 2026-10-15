@@ -207,6 +207,20 @@ describe('HTTP layer', () => {
       expect((res.headers['set-cookie'] as unknown as string[])[0]).toMatch(/^vidshelf_rt=;/);
     });
 
+    it('leaves the cookie alone when a refresh is answered inside the two-tab grace window', async () => {
+      auth.refresh.mockResolvedValue({
+        user: session.user,
+        accessToken: 'access',
+        accessTokenExpiresIn: 900,
+      });
+      const res = await request(server)
+        .post('/api/auth/refresh')
+        .set('Cookie', 'vidshelf_rt=abc')
+        .expect(200);
+      expect(res.headers['set-cookie']).toBeUndefined();
+      expect((res.body as { accessToken: string }).accessToken).toBe('access');
+    });
+
     it('rejects a registration password over 72 bytes with a clear message', async () => {
       const body = { username: 'alice', email: 'a@example.com' };
       const res = await request(server)

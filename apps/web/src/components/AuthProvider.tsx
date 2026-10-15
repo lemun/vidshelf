@@ -33,11 +33,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signOut = useCallback(async () => {
-    try {
-      await api<undefined>('/auth/logout', { method: 'POST' });
-    } finally {
-      setSession(null);
-    }
+    // Signed out locally first: this cancels any refresh in flight and makes the app ignore its
+    // response if it still arrives. The API then ends the session the cookie belongs to.
+    setSession(null);
+    await api<undefined>('/auth/logout', { method: 'POST' });
   }, []);
 
   const value = useMemo<AuthContextValue>(
