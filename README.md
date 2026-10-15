@@ -84,9 +84,20 @@ sequenceDiagram
 - **Streaming uses a presigned GET URL** that is valid for one hour. `<video>` makes its own HTTP
   range requests to MinIO, so seeking works without any streaming code in the API.
 - **Auth.** The access token is a 15-minute JWT that the web app keeps only in memory. The refresh
-  token is a 7-day JWT in an `httpOnly`, `SameSite=Strict` cookie scoped to `/api/auth`. Only its
-  SHA-256 hash is stored. Each refresh consumes the token atomically and issues a new pair.
-  Presenting an already-used token is treated as theft and revokes every session of that user.
+  token is a 7-day JWT in an `httpOnly`, `SameSite=Strict` cookie scoped to `/api/auth`.
+  - Each sign-in starts a session: one MongoDB document that stores the SHA-256 hash of the only
+    refresh token currently valid for it (never the token), a rotation counter and `revokedAt`.
+  - A refresh succeeds only through one conditional update of that document: "this session is not
+    revoked or expired and its current token is the one presented" → "store the replacement's
+    hash". So each refresh token works once.
+  - Presenting a token from an older generation of its session (one that was already used) is
+    treated as theft: that session and every other active session of the user are revoked.
+  - Revoking is also a single-document update, so it cannot be outrun by a refresh that is in
+    flight at the same moment: that refresh either stored its replacement first (and the
+    replacement is revoked with the session), or it finds the session revoked and fails without
+    returning a token. `auth.service.spec.ts` interleaves the two to check this.
+  - Access tokens that were already issued stay valid until they expire (at most 15 minutes).
+    Sessions started by a new sign-in after a revocation are not affected.
   - Because tokens are single-use, the web client must never race itself. Concurrent refreshes
     share one request, and the Web Locks API serializes refreshes across tabs.
   - Every route requires a token unless it is marked `@Public()`. Public routes still read a
@@ -96,7 +107,9 @@ sequenceDiagram
   (`likedBy: {$ne: me}` with `$addToSet` and `$inc`), so double clicks and retries cannot skew the
   count.
 - **Validation and errors.** DTOs use `class-validator`, unknown fields are rejected, and ids are
-  checked before they reach a query. MongoDB duplicate keys map to 409. The environment is
+  checked before they reach a query. Passwords are limited to 72 bytes of UTF-8, not 72
+  characters, because bcrypt ignores everything after byte 72; the bcrypt cost is 12 by default
+  and the API refuses to start with less than 10. MongoDB duplicate keys map to 409. The environment is
   validated once at startup, and the API refuses to start with a list of everything that is wrong.
 - **Thumbnails and duration are captured in the browser.** The upload page draws a frame onto a
   canvas, so the server needs no ffmpeg.
@@ -130,28 +143,30 @@ Node.js 24 LTS (`.nvmrc`).
 ### Everything in Docker
 
 ```bash
-docker compose up --build
+scripts/gen-env.sh        # 1. writes .env with random JWT secrets and MinIO credentials
+docker compose up --build # 2. builds and starts everything
 ```
 
 Open http://localhost:8080. Other addresses:
 
 - API and Swagger: http://localhost:3000/api/docs
-- MinIO console: http://localhost:9001 (`minioadmin` / `minioadmin`)
+- MinIO console: http://localhost:9001 (user `MINIO_ACCESS_KEY`, password `MINIO_SECRET_KEY`
+  from `.env`)
 
-All ports bind to `127.0.0.1`. To stop and delete the data: `docker compose down -v`.
+There are no built-in secrets. Without `.env` (or the same variables in the shell), compose stops
+with "run scripts/gen-env.sh to create .env". `.env` is git-ignored and created with mode 600; the
+script will not overwrite it unless you pass `--force`. All ports bind to `127.0.0.1`. To stop and
+delete the data: `docker compose down -v`.
 
-The defaults are for local use only. Override them through the shell or a `.env` file, using
-`.env.example` as the reference, before exposing this anywhere.
-
-MinIO runs as `pgsty/minio`, a community-maintained build. Upstream MinIO stopped publishing
-community container images in late 2025. The API only speaks S3 through the `minio` SDK, so any
+MinIO runs as `pgsty/minio`, a community-maintained build, pinned in `docker-compose.yml` by tag
+and image digest. Upstream MinIO stopped publishing community container images in late 2025. The API only speaks S3 through the `minio` SDK, so any
 S3-compatible store works if you change `MINIO_*`.
 
 ### Local development (hot reload)
 
 ```bash
+scripts/gen-env.sh                            # skip if .env already exists
 docker compose up -d mongo minio minio-init   # just the data services
-cp .env.example .env
 npm install
 npm run dev                                   # API on :3000, web on http://localhost:5173
 ```
@@ -162,18 +177,21 @@ Vite proxies `/api` to the API, so the browser sees one origin, as it does behin
 
 ```bash
 npm test             # API unit + HTTP-layer tests (Jest), web unit tests (Vitest); no services needed
-npm run test:e2e     # API end-to-end with supertest; needs: docker compose up -d mongo minio minio-init
+npm run test:e2e     # API end-to-end with supertest; needs .env and: docker compose up -d mongo minio minio-init
 npm run test:browser # Playwright smoke; needs the full stack: docker compose up --build -d
 ```
 
 The browser test needs Chromium installed once with `npx playwright install chromium`.
 
 - **Unit tests:**
-  - `auth.service.spec.ts`: registration, login, refresh rotation, reuse detection, expiry, forged
-    tokens and logout, run against an in-memory refresh-token store.
+  - `auth.service.spec.ts`: registration (including the 72-byte limit), login, refresh rotation,
+    reuse detection, expiry, forged tokens and logout, run against an in-memory session store.
+    The "refresh racing reuse detection" tests pause a legitimate refresh while its replacement
+    token is being minted, and again right before it is stored, run the reuse detection in that
+    gap, and check that the replacement never works.
   - `videos.service.spec.ts`: upload policy limits, key ownership, publish checks, search and
     sort, ownership on edit and delete, atomic likes, views.
-  - `env.spec.ts`: environment validation.
+  - `env.spec.ts`: environment validation, including the bcrypt cost floor.
 - **HTTP layer** (`http.spec.ts`): the real controllers, global guard, validation pipe, refresh
   cookie and Swagger document, with mocked services.
 - **End to end** (`apps/api/test/app.e2e-spec.ts`): the whole API against real MongoDB and MinIO,
@@ -195,6 +213,7 @@ Node 24. The Docker-based suites are not in CI yet.
 apps/api      NestJS API (auth/, videos/, minio/, users/, common/, config/)
 apps/web      React SPA (pages/, components/, lib/) + nginx.conf for the container
 e2e           Playwright smoke test, screenshot script and video fixtures
+scripts      gen-env.sh (writes .env with random secrets)
 docker-compose.yml, .env.example, .github/workflows/ci.yml
 ```
 
