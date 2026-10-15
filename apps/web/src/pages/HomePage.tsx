@@ -55,6 +55,8 @@ export function HomePage() {
         total: next.total,
         page: next.page,
       });
+    } catch (error) {
+      setResult({ q, status: 'error', message: (error as Error).message });
     } finally {
       setLoadingMore(false);
     }
