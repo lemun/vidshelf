@@ -19,7 +19,16 @@ describe('validateEnv', () => {
       MINIO_PORT: 9100,
       COOKIE_SECURE: true,
       MAX_UPLOAD_MB: 200,
+      BCRYPT_ROUNDS: 12,
     });
+  });
+
+  it('requires a bcrypt cost of at least 10', () => {
+    expect(() => validateEnv({ ...valid, BCRYPT_ROUNDS: '9' })).toThrow(
+      'BCRYPT_ROUNDS must be an integer between 10 and 15',
+    );
+    expect(() => validateEnv({ ...valid, BCRYPT_ROUNDS: '4' })).toThrow('BCRYPT_ROUNDS');
+    expect(validateEnv({ ...valid, BCRYPT_ROUNDS: '10' }).BCRYPT_ROUNDS).toBe(10);
   });
 
   it('reports every problem at once', () => {

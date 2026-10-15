@@ -8,7 +8,7 @@ import type { Env } from '../config/env';
 import { UsersModule } from '../users/users.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
-import { RefreshToken, RefreshTokenSchema } from './schemas/refresh-token.schema';
+import { RefreshSession, RefreshSessionSchema } from './schemas/refresh-session.schema';
 import { JwtStrategy } from './strategies/jwt.strategy';
 
 @Module({
@@ -22,7 +22,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
         { ttl: 60_000, limit: config.get('AUTH_RATE_LIMIT', { infer: true }) },
       ],
     }),
-    MongooseModule.forFeature([{ name: RefreshToken.name, schema: RefreshTokenSchema }]),
+    MongooseModule.forFeature([{ name: RefreshSession.name, schema: RefreshSessionSchema }]),
     UsersModule,
   ],
   controllers: [AuthController],

@@ -68,7 +68,8 @@ export function validateEnv(raw: Raw): Env {
     JWT_REFRESH_SECRET: str('JWT_REFRESH_SECRET', { minLength: 32 }),
     JWT_ACCESS_TTL_SECONDS: int('JWT_ACCESS_TTL_SECONDS', 900, 10, 86_400),
     JWT_REFRESH_TTL_SECONDS: int('JWT_REFRESH_TTL_SECONDS', 604_800, 60, 7_776_000),
-    BCRYPT_ROUNDS: int('BCRYPT_ROUNDS', 10, 4, 15),
+    // Cost 10 is the floor for stored passwords; 12 is the default (about 4x the work of 10).
+    BCRYPT_ROUNDS: int('BCRYPT_ROUNDS', 12, 10, 15),
     COOKIE_SECURE: bool('COOKIE_SECURE', false),
     AUTH_RATE_LIMIT: int('AUTH_RATE_LIMIT', 20, 1, 10_000),
     MINIO_ENDPOINT: str('MINIO_ENDPOINT'),

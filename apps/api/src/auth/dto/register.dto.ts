@@ -1,6 +1,7 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import { IsEmail, IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import { FitsBcrypt } from '../password';
 
 const trim = ({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value);
 const trimLower = ({ value }: { value: unknown }) =>
@@ -23,10 +24,14 @@ export class RegisterDto {
   @MaxLength(254)
   email!: string;
 
-  @ApiProperty({ example: 'correct-horse-42', minLength: 8, maxLength: 72 })
+  @ApiProperty({
+    example: 'correct-horse-42',
+    minLength: 8,
+    description: 'At most 72 bytes in UTF-8 (bcrypt ignores anything longer)',
+  })
   @IsString()
   @MinLength(8)
-  @MaxLength(72) // bcrypt ignores bytes after 72
+  @FitsBcrypt()
   @Matches(/^(?=.*[A-Za-z])(?=.*\d)/, {
     message: 'password must contain at least one letter and one number',
   })

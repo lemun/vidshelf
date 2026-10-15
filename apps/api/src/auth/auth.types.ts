@@ -7,6 +7,10 @@ export interface AccessTokenPayload {
 
 export interface RefreshTokenPayload {
   sub: string;
+  /** The refresh session (token family) this token belongs to. */
+  sid: string;
+  /** The session's rotation counter when this token was issued. */
+  gen: number;
   /** Random id so two tokens issued in the same second never collide. */
   jti: string;
 }

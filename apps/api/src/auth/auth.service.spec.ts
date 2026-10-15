@@ -1,4 +1,4 @@
-import { ConflictException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, UnauthorizedException } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import bcrypt from 'bcrypt';
@@ -8,7 +8,8 @@ import type { Env } from '../config/env';
 import type { UserDocument } from '../users/schemas/user.schema';
 import type { UsersService } from '../users/users.service';
 import { AuthService, hashToken } from './auth.service';
-import type { RefreshToken } from './schemas/refresh-token.schema';
+import { PASSWORD_TOO_LONG_MESSAGE } from './password';
+import type { RefreshSession } from './schemas/refresh-session.schema';
 
 const ENV: Partial<Env> = {
   JWT_ACCESS_SECRET: 'unit-test-access-secret-0123456789abcdef',
@@ -18,70 +19,100 @@ const ENV: Partial<Env> = {
   BCRYPT_ROUNDS: 4,
 };
 
-interface TokenRow {
+interface SessionRow {
   _id: Types.ObjectId;
   user: Types.ObjectId;
   tokenHash: string;
+  generation: number;
   expiresAt: Date;
   revokedAt: Date | null;
 }
 
-/**
- * In-memory stand-in for the RefreshToken model, implementing only the query shapes AuthService
- * uses. It lets the rotation and reuse-detection rules run for real without a database.
- */
-class FakeRefreshTokens {
-  rows: TokenRow[] = [];
+type Filter = Record<string, unknown>;
+type Update = { $set: Partial<SessionRow> };
 
-  create(doc: Omit<TokenRow, '_id' | 'revokedAt'>) {
-    const row = { _id: new Types.ObjectId(), revokedAt: null, ...doc };
+const idOrValue = (v: unknown) => (v instanceof Types.ObjectId ? v.toHexString() : v);
+
+/** Equality on ids/strings/numbers/null, plus `{ $gt: Date }`: the only operators AuthService uses. */
+function matches(row: SessionRow, filter: Filter): boolean {
+  return Object.entries(filter).every(([key, want]) => {
+    const have = row[key as keyof SessionRow];
+    if (want !== null && typeof want === 'object' && '$gt' in want) {
+      return have instanceof Date && have > (want as { $gt: Date }).$gt;
+    }
+    if (want === null || have === null) return have === want;
+    return idOrValue(have) === idOrValue(want);
+  });
+}
+
+/**
+ * In-memory stand-in for the RefreshSession model, implementing only the calls AuthService makes.
+ * Each call is applied in one synchronous step, like a single-document update in MongoDB, so the
+ * rotation and revocation rules run for real without a database.
+ *
+ * `holdNextRotation()` pauses the next rotation write just before it is applied, so a test can
+ * run something else at exactly that point.
+ */
+class FakeSessions {
+  rows: SessionRow[] = [];
+  private gate?: { reached: () => void; release: Promise<void> };
+
+  create(doc: Omit<SessionRow, 'revokedAt'>) {
+    const row = { revokedAt: null, ...doc };
     this.rows.push(row);
     return Promise.resolve(row);
   }
 
-  findOneAndUpdate(
-    filter: { tokenHash: string; expiresAt: { $gt: Date } },
-    update: { $set: { revokedAt: Date } },
-  ) {
-    const row = this.rows.find(
-      (r) =>
-        r.tokenHash === filter.tokenHash &&
-        r.revokedAt === null &&
-        r.expiresAt > filter.expiresAt.$gt,
-    );
-    if (row) row.revokedAt = update.$set.revokedAt;
-    // Mongoose returns the document as it was before the update by default.
-    return exec(row ? { ...row, revokedAt: null } : null);
+  findById(id: string) {
+    return exec(() => this.rows.find((r) => r._id.toString() === id) ?? null);
   }
 
-  findOne(filter: { tokenHash: string }) {
-    return exec(this.rows.find((r) => r.tokenHash === filter.tokenHash) ?? null);
+  updateOne(filter: Filter, update: Update) {
+    const isRotation = 'generation' in filter;
+    return {
+      exec: async () => {
+        const gate = isRotation ? this.gate : undefined;
+        if (gate) {
+          this.gate = undefined;
+          gate.reached();
+          await gate.release;
+        }
+        const row = this.rows.find((r) => matches(r, filter));
+        if (row) Object.assign(row, update.$set);
+        return { matchedCount: row ? 1 : 0, modifiedCount: row ? 1 : 0 };
+      },
+    };
   }
 
-  updateOne(filter: { tokenHash: string }, update: { $set: { revokedAt: Date } }) {
-    const row = this.rows.find((r) => r.tokenHash === filter.tokenHash && r.revokedAt === null);
-    if (row) row.revokedAt = update.$set.revokedAt;
-    return exec({ modifiedCount: row ? 1 : 0 });
+  updateMany(filter: Filter, update: Update) {
+    return exec(() => {
+      const hit = this.rows.filter((r) => matches(r, filter));
+      for (const row of hit) Object.assign(row, update.$set);
+      return { matchedCount: hit.length, modifiedCount: hit.length };
+    });
   }
 
-  updateMany(filter: { user: string }, update: { $set: { revokedAt: Date } }) {
-    let modifiedCount = 0;
-    for (const row of this.rows) {
-      if (row.user.toString() === filter.user && row.revokedAt === null) {
-        row.revokedAt = update.$set.revokedAt;
-        modifiedCount++;
-      }
-    }
-    return exec({ modifiedCount });
+  holdNextRotation() {
+    return hold((gate) => (this.gate = gate));
   }
 
-  active(): TokenRow[] {
+  active(): SessionRow[] {
     return this.rows.filter((r) => r.revokedAt === null);
   }
 }
 
-function exec<T>(value: T) {
-  return { exec: () => Promise.resolve(value) };
+function exec<T>(run: () => T) {
+  return { exec: () => Promise.resolve().then(run) };
+}
+
+/** A pause point: `reached` resolves when the code under test arrives, `release()` lets it go on. */
+function hold(install: (gate: { reached: () => void; release: Promise<void> }) => void) {
+  let reached!: () => void;
+  let release!: () => void;
+  const arrived = new Promise<void>((r) => (reached = r));
+  const released = new Promise<void>((r) => (release = r));
+  install({ reached, release: released });
+  return { reached: arrived, release };
 }
 
 function makeUser(
@@ -97,8 +128,11 @@ function makeUser(
   } as unknown as UserDocument;
 }
 
+const LOGIN = { email: 'demo@example.com', password: 'correct-horse-42' };
+
 describe('AuthService', () => {
-  let tokens: FakeRefreshTokens;
+  let sessions: FakeSessions;
+  let jwt: JwtService;
   let users: jest.Mocked<
     Pick<
       UsersService,
@@ -108,8 +142,28 @@ describe('AuthService', () => {
   let service: AuthService;
   let user: UserDocument;
 
+  /** Pauses the next refresh-token signing (the replacement being minted) until released. */
+  function holdNextRefreshSigning() {
+    const sign = jwt.signAsync.bind(jwt) as (p: object, o: { secret?: string }) => Promise<string>;
+    return hold((gate) => {
+      const spy = jest.spyOn(jwt, 'signAsync').mockImplementation((async (
+        payload: object,
+        options: { secret?: string },
+      ) => {
+        const token = await sign(payload, options);
+        if (options.secret === ENV.JWT_REFRESH_SECRET) {
+          spy.mockRestore();
+          gate.reached();
+          await gate.release;
+        }
+        return token;
+      }) as unknown as JwtService['signAsync']);
+    });
+  }
+
   beforeEach(async () => {
-    tokens = new FakeRefreshTokens();
+    sessions = new FakeSessions();
+    jwt = new JwtService({});
     user = makeUser({ passwordHash: await bcrypt.hash('correct-horse-42', 4) });
     users = {
       findById: jest.fn().mockResolvedValue(user),
@@ -119,10 +173,10 @@ describe('AuthService', () => {
     };
     const config = { get: (key: keyof Env) => ENV[key] } as unknown as ConfigService<Env, true>;
     service = new AuthService(
-      new JwtService({}),
+      jwt,
       users as unknown as UsersService,
       config,
-      tokens as unknown as Model<RefreshToken>,
+      sessions as unknown as Model<RefreshSession>,
     );
   });
 
@@ -145,9 +199,9 @@ describe('AuthService', () => {
         createdAt: '2026-01-01T00:00:00.000Z',
       });
       expect(session.user).not.toHaveProperty('passwordHash');
-      expect(tokens.rows).toHaveLength(1);
-      expect(tokens.rows[0].tokenHash).toBe(hashToken(session.refreshToken));
-      expect(tokens.rows[0].tokenHash).not.toBe(session.refreshToken);
+      expect(sessions.rows).toHaveLength(1);
+      expect(sessions.rows[0].tokenHash).toBe(hashToken(session.refreshToken));
+      expect(sessions.rows[0].tokenHash).not.toBe(session.refreshToken);
     });
 
     it('rejects a taken email or username', async () => {
@@ -161,14 +215,28 @@ describe('AuthService', () => {
       ).rejects.toBeInstanceOf(ConflictException);
       expect(users.create).not.toHaveBeenCalled();
     });
+
+    it('rejects a password longer than 72 bytes even when it is under 72 characters', async () => {
+      const password = 'é'.repeat(36) + '1'; // 37 characters, 73 bytes
+      expect(password.length).toBeLessThan(72);
+      await expect(
+        service.register({ username: 'demo_user', email: 'demo@example.com', password }),
+      ).rejects.toThrow(new BadRequestException(PASSWORD_TOO_LONG_MESSAGE));
+      expect(users.create).not.toHaveBeenCalled();
+
+      // Exactly 72 bytes is fine.
+      await service.register({
+        username: 'demo_user',
+        email: 'demo@example.com',
+        password: 'é'.repeat(35) + 'a1',
+      });
+      expect(users.create).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('login', () => {
     it('issues an access token carrying the user id and name', async () => {
-      const session = await service.login({
-        email: 'demo@example.com',
-        password: 'correct-horse-42',
-      });
+      const session = await service.login(LOGIN);
       const payload = new JwtService({}).verify<{ sub: string; username: string }>(
         session.accessToken,
         {
@@ -186,52 +254,47 @@ describe('AuthService', () => {
       await expect(
         service.login({ email: 'nobody@example.com', password: 'whatever-1' }),
       ).rejects.toThrow(new UnauthorizedException('Invalid email or password'));
-      expect(tokens.rows).toHaveLength(0);
+      expect(sessions.rows).toHaveLength(0);
     });
   });
 
   describe('refresh (rotation)', () => {
-    it('consumes the presented token and issues a new pair', async () => {
-      const first = await service.login({
-        email: 'demo@example.com',
-        password: 'correct-horse-42',
-      });
+    it('consumes the presented token and issues a new pair in the same session', async () => {
+      const first = await service.login(LOGIN);
       const second = await service.refresh(first.refreshToken);
 
       expect(second.refreshToken).not.toBe(first.refreshToken);
       expect(second.accessToken).toEqual(expect.any(String));
-      const old = tokens.rows.find((r) => r.tokenHash === hashToken(first.refreshToken));
-      expect(old?.revokedAt).toBeInstanceOf(Date);
-      expect(tokens.active().map((r) => r.tokenHash)).toEqual([hashToken(second.refreshToken)]);
+      expect(sessions.rows).toHaveLength(1);
+      expect(sessions.rows[0]).toMatchObject({
+        tokenHash: hashToken(second.refreshToken),
+        generation: 1,
+        revokedAt: null,
+      });
+      await expect(service.refresh(second.refreshToken)).resolves.toBeDefined();
     });
 
     it('treats reuse of a consumed token as theft and revokes every session of the user', async () => {
-      const first = await service.login({
-        email: 'demo@example.com',
-        password: 'correct-horse-42',
-      });
-      const otherDevice = await service.login({
-        email: 'demo@example.com',
-        password: 'correct-horse-42',
-      });
-      await service.refresh(first.refreshToken);
-      expect(tokens.active()).toHaveLength(2);
+      const first = await service.login(LOGIN);
+      const otherDevice = await service.login(LOGIN);
+      const second = await service.refresh(first.refreshToken);
+      expect(sessions.active()).toHaveLength(2);
 
       await expect(service.refresh(first.refreshToken)).rejects.toBeInstanceOf(
         UnauthorizedException,
       );
-      expect(tokens.active()).toHaveLength(0);
+      expect(sessions.active()).toHaveLength(0);
+      await expect(service.refresh(second.refreshToken)).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
       await expect(service.refresh(otherDevice.refreshToken)).rejects.toBeInstanceOf(
         UnauthorizedException,
       );
     });
 
-    it('rejects a token whose stored record has expired', async () => {
-      const session = await service.login({
-        email: 'demo@example.com',
-        password: 'correct-horse-42',
-      });
-      tokens.rows[0].expiresAt = new Date(Date.now() - 1000);
+    it('rejects a token whose stored session has expired', async () => {
+      const session = await service.login(LOGIN);
+      sessions.rows[0].expiresAt = new Date(Date.now() - 1000);
       await expect(service.refresh(session.refreshToken)).rejects.toBeInstanceOf(
         UnauthorizedException,
       );
@@ -241,29 +304,92 @@ describe('AuthService', () => {
       await expect(service.refresh(undefined)).rejects.toThrow('Missing refresh token');
       await expect(service.refresh('not-a-jwt')).rejects.toThrow('Invalid refresh token');
       const forged = new JwtService({}).sign(
-        { sub: user._id.toString(), jti: 'x' },
+        { sub: user._id.toString(), sid: new Types.ObjectId().toString(), gen: 0, jti: 'x' },
         { secret: ENV.JWT_ACCESS_SECRET },
       );
       await expect(service.refresh(forged)).rejects.toThrow('Invalid refresh token');
     });
 
+    it('rejects a correctly signed token that is not a session token', async () => {
+      const malformed = new JwtService({}).sign(
+        { sub: user._id.toString(), sid: 'not-an-id', gen: 0, jti: 'x' },
+        { secret: ENV.JWT_REFRESH_SECRET },
+      );
+      await expect(service.refresh(malformed)).rejects.toThrow('Invalid refresh token');
+    });
+
     it('rejects an access token presented as a refresh token', async () => {
-      const session = await service.login({
-        email: 'demo@example.com',
-        password: 'correct-horse-42',
-      });
+      const session = await service.login(LOGIN);
       await expect(service.refresh(session.accessToken)).rejects.toBeInstanceOf(
         UnauthorizedException,
       );
     });
   });
 
+  /**
+   * The race the session document exists for: a legitimate client refreshes with its current
+   * token while a replay of an older token triggers reuse detection. Whatever the interleaving,
+   * no refresh token minted by that legitimate refresh may still work after the revocation.
+   */
+  describe('refresh racing reuse detection', () => {
+    async function rotatedOnce() {
+      const stolen = await service.login(LOGIN); // the attacker keeps a copy of this one
+      const current = await service.refresh(stolen.refreshToken); // the real client moves on
+      return { stolen: stolen.refreshToken, current: current.refreshToken };
+    }
+
+    it('rejects a replacement minted while reuse detection revokes the session', async () => {
+      const { stolen, current } = await rotatedOnce();
+
+      // 1. The legitimate refresh verifies its token and starts minting the replacement...
+      const signing = holdNextRefreshSigning();
+      const legit = service.refresh(current);
+      await signing.reached;
+      // 2. ...the replay of the spent token is detected and revokes everything...
+      await expect(service.refresh(stolen)).rejects.toThrow('Invalid refresh token');
+      expect(sessions.active()).toHaveLength(0);
+      // 3. ...then the legitimate refresh finishes and tries to store its replacement.
+      signing.release();
+
+      await expect(legit).rejects.toThrow('Invalid refresh token');
+      expect(sessions.rows[0].tokenHash).toBe(hashToken(current)); // replacement never stored
+      expect(sessions.active()).toHaveLength(0);
+    });
+
+    it('rejects a replacement whose write is the last thing to happen', async () => {
+      const { stolen, current } = await rotatedOnce();
+
+      // Pause the legitimate refresh at the latest possible point: right before its write.
+      const write = sessions.holdNextRotation();
+      const legit = service.refresh(current);
+      await write.reached;
+      await expect(service.refresh(stolen)).rejects.toThrow('Invalid refresh token');
+      write.release();
+
+      await expect(legit).rejects.toThrow('Invalid refresh token');
+      expect(sessions.active()).toHaveLength(0);
+    });
+
+    it('revokes a replacement that was stored just before the reuse was detected', async () => {
+      const { stolen, current } = await rotatedOnce();
+
+      const replacement = await service.refresh(current); // wins the race
+      await expect(service.refresh(stolen)).rejects.toThrow('Invalid refresh token');
+
+      await expect(service.refresh(replacement.refreshToken)).rejects.toThrow(
+        'Invalid refresh token',
+      );
+      expect(sessions.active()).toHaveLength(0);
+    });
+  });
+
   describe('logout', () => {
-    it('revokes only the presented token', async () => {
-      const a = await service.login({ email: 'demo@example.com', password: 'correct-horse-42' });
-      const b = await service.login({ email: 'demo@example.com', password: 'correct-horse-42' });
+    it('ends only the session of the presented token', async () => {
+      const a = await service.login(LOGIN);
+      const b = await service.login(LOGIN);
       await service.logout(a.refreshToken);
-      expect(tokens.active().map((r) => r.tokenHash)).toEqual([hashToken(b.refreshToken)]);
+      expect(sessions.active().map((r) => r.tokenHash)).toEqual([hashToken(b.refreshToken)]);
+      await expect(service.refresh(a.refreshToken)).rejects.toThrow('Invalid refresh token');
       await expect(service.logout(undefined)).resolves.toBeUndefined();
     });
   });

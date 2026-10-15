@@ -207,6 +207,25 @@ describe('HTTP layer', () => {
       expect((res.headers['set-cookie'] as unknown as string[])[0]).toMatch(/^vidshelf_rt=;/);
     });
 
+    it('rejects a registration password over 72 bytes with a clear message', async () => {
+      const body = { username: 'alice', email: 'a@example.com' };
+      const res = await request(server)
+        .post('/api/auth/register')
+        .send({ ...body, password: 'a1' + 'é'.repeat(39) }) // 41 characters, 80 bytes
+        .expect(400);
+      expect((res.body as { message: string[] }).message).toEqual([
+        'password must be at most 72 bytes in UTF-8 (letters outside A-Z, such as é or emoji, count as 2-4 bytes each)',
+      ]);
+      expect(auth.register).not.toHaveBeenCalled();
+
+      auth.register.mockResolvedValue(session);
+      await request(server)
+        .post('/api/auth/register')
+        .send({ ...body, password: 'a1' + 'é'.repeat(35) }) // exactly 72 bytes
+        .expect(201);
+      expect(auth.register).toHaveBeenCalledTimes(1);
+    });
+
     it('protects /me', async () => {
       await request(server).get('/api/auth/me').expect(401);
       auth.me.mockResolvedValue({ user: session.user });
