@@ -1,26 +1,34 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsEmail, IsNotEmpty, IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import { Transform } from 'class-transformer';
+import { IsEmail, IsString, Matches, MaxLength, MinLength } from 'class-validator';
+
+const trim = ({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value);
+const trimLower = ({ value }: { value: unknown }) =>
+  typeof value === 'string' ? value.trim().toLowerCase() : value;
 
 export class RegisterDto {
-  @ApiProperty({ example: 'shaisinai', description: 'Unique username' })
+  @ApiProperty({ example: 'demo_user', minLength: 3, maxLength: 24 })
+  @Transform(trim)
   @IsString()
-  @IsNotEmpty()
   @MinLength(3)
-  @MaxLength(20)
+  @MaxLength(24)
+  @Matches(/^[A-Za-z0-9_.-]+$/, {
+    message: 'username may only contain letters, numbers, dots, dashes and underscores',
+  })
   username!: string;
 
-  @ApiProperty({ example: 'user@example.com', description: 'User email address' })
+  @ApiProperty({ example: 'demo@example.com' })
+  @Transform(trimLower)
   @IsEmail()
-  @IsNotEmpty()
+  @MaxLength(254)
   email!: string;
 
-
-  @ApiProperty({ example: 'StrongPass123!', description: 'Password (min 8 chars, must include letters & numbers)' })
+  @ApiProperty({ example: 'correct-horse-42', minLength: 8, maxLength: 72 })
   @IsString()
-  @IsNotEmpty()
   @MinLength(8)
-  @Matches(/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d\s]{8,}$/, {
-    message: 'Password must contain letters and numbers',
+  @MaxLength(72) // bcrypt ignores bytes after 72
+  @Matches(/^(?=.*[A-Za-z])(?=.*\d)/, {
+    message: 'password must contain at least one letter and one number',
   })
   password!: string;
 }

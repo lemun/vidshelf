@@ -1,154 +1,173 @@
-import { ConflictException, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { InjectModel } from '@nestjs/mongoose';
-import * as crypto from 'crypto';
-import jwt from 'jsonwebtoken';
-import { Model, Types } from 'mongoose';
-import { User } from '../users/schemas/user.schema';
-import { comparePassword, generateHash } from '../utils/bcrypt';
+import bcrypt from 'bcrypt';
+import { createHash, randomUUID } from 'node:crypto';
+import { Model } from 'mongoose';
+import type { Env } from '../config/env';
+import { toPublicUser } from '../users/public-user';
+import type { UserDocument } from '../users/schemas/user.schema';
+import { UsersService } from '../users/users.service';
+import type { AccessTokenPayload, ClientMeta, RefreshTokenPayload, Session } from './auth.types';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
-import { REFRESH_TOKEN_SECRET, REFRESH_TOKEN_TTL } from './interfaces/constants';
-import { JwtTokenPair } from './interfaces/jwt-token-pair';
 import { RefreshToken } from './schemas/refresh-token.schema';
+
+export const hashToken = (token: string): string =>
+  createHash('sha256').update(token).digest('hex');
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+  /** Compared against when the email is unknown, so both failure paths cost one bcrypt check. */
+  private readonly dummyHash: Promise<string>;
+
   constructor(
-    private readonly jwtService: JwtService,
-    @InjectModel('User') private readonly userModel: Model<User>,
-    @InjectModel(RefreshToken.name) private readonly rtModel: Model<RefreshToken>,
-  ) {}
+    private readonly jwt: JwtService,
+    private readonly users: UsersService,
+    private readonly config: ConfigService<Env, true>,
+    @InjectModel(RefreshToken.name) private readonly refreshTokens: Model<RefreshToken>,
+  ) {
+    this.dummyHash = bcrypt.hash(
+      'timing-equaliser',
+      this.config.get('BCRYPT_ROUNDS', { infer: true }),
+    );
+  }
 
-  async register(dto: RegisterDto) {
-    const existingUser = await this.userModel.findOne({
-      $or: [{ email: dto.email }, { username: dto.username }]
-    });
-
-    if (existingUser) {
-      throw new ConflictException('User with this email or username already exists');
+  async register(dto: RegisterDto, meta: ClientMeta = {}): Promise<Session> {
+    if (await this.users.existsByEmailOrUsername(dto.email, dto.username)) {
+      throw new ConflictException('An account with this email or username already exists');
     }
-
-    const passwordHash = await generateHash(dto.password);
-    const user = new this.userModel({
+    const passwordHash = await bcrypt.hash(
+      dto.password,
+      this.config.get('BCRYPT_ROUNDS', { infer: true }),
+    );
+    const user = await this.users.create({
       username: dto.username,
       email: dto.email,
       passwordHash,
     });
-
-    await user.save();
-    const tokens = await this.issueTokenPair(user);
-    await this.storeRefreshToken(user._id, tokens.refreshToken);
-
-    return {
-      user: this.getSafeUser(user),
-      tokens
-    };
+    return this.issueSession(user, meta);
   }
 
-  async login(dto: LoginDto) {
-    const user = await this.userModel.findOne({ email: dto.email });
-    if (!user) {
-      throw new UnauthorizedException('Invalid credentials');
+  async login(dto: LoginDto, meta: ClientMeta = {}): Promise<Session> {
+    const user = await this.users.findByEmailWithPassword(dto.email);
+    const valid = await bcrypt.compare(dto.password, user?.passwordHash ?? (await this.dummyHash));
+    if (!user || !valid) {
+      throw new UnauthorizedException('Invalid email or password');
+    }
+    return this.issueSession(user, meta);
+  }
+
+  /**
+   * Exchanges a refresh token for a new access + refresh pair. The presented token is consumed
+   * atomically, so it works exactly once. Presenting an already-consumed token means it leaked
+   * (or a client raced itself), and every session of that user is revoked.
+   */
+  async refresh(refreshToken: string | undefined, meta: ClientMeta = {}): Promise<Session> {
+    if (!refreshToken) {
+      throw new UnauthorizedException('Missing refresh token');
     }
 
-    const isPasswordValid = await comparePassword(dto.password, user.passwordHash);
-    if (!isPasswordValid) {
-      throw new UnauthorizedException('Invalid credentials');
-    }
-
-    const tokens = await this.issueTokenPair(user);
-
-    await this.storeRefreshToken(user._id, tokens.refreshToken);
-
-    return {
-      user: this.getSafeUser(user),
-      tokens
-    };
-  }
-
-  async logout(userId: string) {
-    await this.revokeRefreshToken(userId);
-    return { success: true };
-  }
-
-  async rotateRefreshToken(refreshToken: string) {
-    const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
-    const storedToken = await this.rtModel.findOne({
-      tokenHash,
-      revoked: false,
-      expiresAt: { $gt: new Date() }
-    }).populate('user');
-
-    if (!storedToken) {
+    let payload: RefreshTokenPayload;
+    try {
+      payload = await this.jwt.verifyAsync<RefreshTokenPayload>(refreshToken, {
+        secret: this.config.get('JWT_REFRESH_SECRET', { infer: true }),
+        algorithms: ['HS256'],
+      });
+    } catch {
       throw new UnauthorizedException('Invalid refresh token');
     }
 
-    await this.rtModel.findByIdAndUpdate(storedToken._id, { revoked: true });
+    const tokenHash = hashToken(refreshToken);
+    const now = new Date();
+    const consumed = await this.refreshTokens
+      .findOneAndUpdate(
+        { tokenHash, revokedAt: null, expiresAt: { $gt: now } },
+        { $set: { revokedAt: now } },
+      )
+      .exec();
 
-    const tokens = await this.issueTokenPair(storedToken.user as unknown as User);
+    if (!consumed) {
+      const known = await this.refreshTokens.findOne({ tokenHash }).exec();
+      if (known?.revokedAt) {
+        this.logger.warn(`Refresh token reuse detected for user ${known.user.toString()}`);
+        await this.revokeAllForUser(known.user.toString());
+      }
+      throw new UnauthorizedException('Invalid refresh token');
+    }
 
-    await this.storeRefreshToken(storedToken.user, tokens.refreshToken);
-
-    return { tokens };
-  }
-
-  async getProfile(userId: string) {
-    const user = await this.userModel.findById(userId);
+    if (consumed.user.toString() !== payload.sub) {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+    const user = await this.users.findById(consumed.user);
     if (!user) {
-      throw new NotFoundException('User not found');
+      throw new UnauthorizedException('Invalid refresh token');
     }
-
-    return { user: this.getSafeUser(user) };
+    return this.issueSession(user, meta);
   }
 
-  async issueTokenPair(user: User): Promise<JwtTokenPair> {
-    const payload = {
-      sub: user._id.toString(),
-      email: user.email,
-      username: user.username
+  /** Revokes the given refresh token if it is still active. Always succeeds (idempotent). */
+  async logout(refreshToken: string | undefined): Promise<void> {
+    if (!refreshToken) return;
+    await this.refreshTokens
+      .updateOne(
+        { tokenHash: hashToken(refreshToken), revokedAt: null },
+        { $set: { revokedAt: new Date() } },
+      )
+      .exec();
+  }
+
+  async revokeAllForUser(userId: string): Promise<void> {
+    await this.refreshTokens
+      .updateMany({ user: userId, revokedAt: null }, { $set: { revokedAt: new Date() } })
+      .exec();
+  }
+
+  async me(userId: string) {
+    const user = await this.users.findById(userId);
+    if (!user) {
+      throw new UnauthorizedException('Account no longer exists');
+    }
+    return { user: toPublicUser(user) };
+  }
+
+  private async issueSession(user: UserDocument, meta: ClientMeta): Promise<Session> {
+    const accessTtl = this.config.get('JWT_ACCESS_TTL_SECONDS', { infer: true });
+    const refreshTtl = this.config.get('JWT_REFRESH_TTL_SECONDS', { infer: true });
+
+    const accessPayload: AccessTokenPayload = { sub: user._id.toString(), username: user.username };
+    const refreshPayload: RefreshTokenPayload = { sub: user._id.toString(), jti: randomUUID() };
+
+    const [accessToken, refreshToken] = await Promise.all([
+      this.jwt.signAsync(accessPayload, {
+        secret: this.config.get('JWT_ACCESS_SECRET', { infer: true }),
+        expiresIn: accessTtl,
+        algorithm: 'HS256',
+      }),
+      this.jwt.signAsync(refreshPayload, {
+        secret: this.config.get('JWT_REFRESH_SECRET', { infer: true }),
+        expiresIn: refreshTtl,
+        algorithm: 'HS256',
+      }),
+    ]);
+
+    const refreshTokenExpiresAt = new Date(Date.now() + refreshTtl * 1000);
+    await this.refreshTokens.create({
+      user: user._id,
+      tokenHash: hashToken(refreshToken),
+      expiresAt: refreshTokenExpiresAt,
+      userAgent: meta.userAgent?.slice(0, 256),
+      ip: meta.ip,
+    });
+
+    return {
+      user: toPublicUser(user),
+      accessToken,
+      accessTokenExpiresIn: accessTtl,
+      refreshToken,
+      refreshTokenExpiresAt,
     };
-
-    const accessToken = this.jwtService.sign(payload);
-
-    const refreshToken = jwt.sign(payload, REFRESH_TOKEN_SECRET, {
-      expiresIn: REFRESH_TOKEN_TTL
-    });
-
-    return { accessToken, refreshToken };
-  }
-
-  async storeRefreshToken(userId: Types.ObjectId, refreshToken: string, meta?: { ip?: string, userAgent?: string }) {
-    const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
-    const expiresAt = new Date(Date.now() + parseInt(REFRESH_TOKEN_TTL) * 1000);
-
-    const refreshTokenDoc = new this.rtModel({
-      user: userId,
-      tokenHash,
-      userAgent: meta?.userAgent,
-      ip: meta?.ip,
-      expiresAt
-    });
-
-    await refreshTokenDoc.save();
-    return refreshTokenDoc;
-  }
-
-  async revokeRefreshToken(userId: string, token?: string) {
-    const filter: any = { user: userId, revoked: false };
-
-    if (token) {
-      const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-      filter.tokenHash = tokenHash;
-    }
-
-    await this.rtModel.updateMany(filter, { revoked: true });
-    return { success: true };
-  }
-
-  private getSafeUser(user: User) {
-    const userObj = (user as any).toObject ? (user as any).toObject() : user;
-    const { passwordHash, ...safeUser } = userObj;
-    return safeUser;
   }
 }

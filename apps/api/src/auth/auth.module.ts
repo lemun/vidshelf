@@ -1,35 +1,32 @@
-import { Module, forwardRef } from '@nestjs/common';
+import { Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { MongooseModule } from '@nestjs/mongoose';
 import { PassportModule } from '@nestjs/passport';
-
+import { ThrottlerModule } from '@nestjs/throttler';
+import type { Env } from '../config/env';
+import { UsersModule } from '../users/users.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
-
-import { JwtRefreshGuard } from './guards/jwt-refresh.guard';
-import { JwtRefreshStrategy } from './strategies/jwt-refresh.strategy';
+import { RefreshToken, RefreshTokenSchema } from './schemas/refresh-token.schema';
 import { JwtStrategy } from './strategies/jwt.strategy';
 
-import { User, UserSchema } from '../users/schemas/user.schema';
-import { UsersModule } from '../users/users.module';
-import { RefreshToken, RefreshTokenSchema } from './schemas/refresh-token.schema';
-
 @Module({
-    imports: [
-        PassportModule,
-        JwtModule.register({
-            secret: process.env.JWT_ACCESS_TOKEN_SECRET,
-            signOptions: { expiresIn: process.env.JWT_ACCESS_TOKEN_TTL },
-        }),
-        MongooseModule.forFeature([
-            { name: User.name, schema: UserSchema },
-            { name: RefreshToken.name, schema: RefreshTokenSchema },
-        ]),
-        forwardRef(() => UsersModule),
-    ],
-    controllers: [AuthController],
-    providers: [AuthService, JwtStrategy, JwtRefreshStrategy, JwtRefreshGuard],
-    exports: [AuthService],
+  imports: [
+    PassportModule,
+    // Secrets and lifetimes are passed per call in AuthService (access and refresh differ).
+    JwtModule.register({}),
+    ThrottlerModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService<Env, true>) => [
+        { ttl: 60_000, limit: config.get('AUTH_RATE_LIMIT', { infer: true }) },
+      ],
+    }),
+    MongooseModule.forFeature([{ name: RefreshToken.name, schema: RefreshTokenSchema }]),
+    UsersModule,
+  ],
+  controllers: [AuthController],
+  providers: [AuthService, JwtStrategy],
+  exports: [AuthService],
 })
-
 export class AuthModule {}
