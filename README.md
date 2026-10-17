@@ -1,41 +1,87 @@
-# Vidshelf
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/banner-light.png">
+  <img src="docs/assets/banner-light.png" alt="Vidshelf: a small full-stack video sharing app with direct-to-storage uploads and streaming" width="100%">
+</picture>
+
+### Upload straight to object storage. Stream straight back.
+
+[![CI](https://github.com/lemun/vidshelf/actions/workflows/ci.yml/badge.svg)](https://github.com/lemun/vidshelf/actions/workflows/ci.yml)
+[![Node.js 24](https://img.shields.io/badge/node-24%20LTS-brightgreen)](.nvmrc)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+[Quick start](#quick-start) · [How it works](#how-it-works) · [Features](#features) · [API](#api) · [Tests](#tests) · [Limits](#what-is-not-done)
+
+</div>
 
 A small full-stack video sharing app. You can sign up, upload a video straight to object storage,
 browse and search, watch it stream, and like it.
 
-- **API:** NestJS 12, MongoDB (Mongoose 9), MinIO (S3-compatible) and Swagger. Access and refresh
-  JWTs, where each refresh token can be used once and replaying a used one is detected.
-- **Web:** React 19, React Router 8, Vite 8 and Tailwind CSS 4.
-- **Ops:** a single `docker compose` file runs MongoDB, MinIO with a bucket-init step, the API, and
-  the web app behind nginx.
-
 The scope is deliberately small: every feature listed here is wired end to end, and
 [What is not done](#what-is-not-done) lists what is missing.
 
-## Status
+<p align="center">
+  <img src="docs/screenshots/home.png" alt="Vidshelf home page: a grid of video cards with duration badges, a search bar and an Upload button." width="880">
+  <br>
+  <sub>The home page from the running compose stack, with sample videos (not a mockup).</sub>
+</p>
 
-| Check                                                      | How                                                              | State           | In CI |
-| ---------------------------------------------------------- | ---------------------------------------------------------------- | --------------- | ----- |
-| Lint, typecheck, unit + HTTP-layer tests, production build | `npm run lint && npm run typecheck && npm test && npm run build` | Passing locally | Yes   |
-| API end-to-end tests (real MongoDB + MinIO)                | [Tests](#tests)                                                  | Passing locally | No    |
-| Browser smoke test (Playwright)                            | [Tests](#tests)                                                  | Passing locally | No    |
-| `docker compose up --build`                                | [Run it](#run-it)                                                | Passing locally | No    |
+## Why Vidshelf
 
-The last three need Docker. They were last run on 2026-10-15 against this compose stack (OrbStack on an
-Apple Silicon Mac): 17 API end-to-end tests and the browser smoke test passed.
+- **Video bytes never touch the API.** The API signs short-lived URLs; the browser uploads to and
+  streams from MinIO directly, so the Node process never holds a video in memory.
+- **Storage enforces the rules.** Uploads use a presigned POST policy, so MinIO itself rejects
+  any file outside the signed key, content type or size range.
+- **Auth that notices theft.** Access and refresh JWTs where each refresh token works once, and
+  replaying a used one revokes the user's sessions.
+- **One command to run.** A single `docker compose` file starts MongoDB, MinIO, the API and the
+  web app behind nginx. There are no built-in secrets.
 
-## Screenshots
+## Quick start
 
-Taken by Playwright from the running compose stack, not mockups. To regenerate them:
-`docker compose up --build -d && SCREENSHOTS=1 npx playwright test screenshots`.
+Requires Docker with Compose v2. For local development you also need Node.js 24 LTS (`.nvmrc`).
 
-![Home: video grid with search](docs/screenshots/home.png)
+```bash
+git clone https://github.com/lemun/vidshelf.git
+cd vidshelf
+scripts/gen-env.sh        # writes .env with random JWT secrets and MinIO credentials
+docker compose up --build # builds and starts everything
+```
 
-![Watch page: player, likes, owner delete and the "more videos" rail](docs/screenshots/watch.png)
+Open http://localhost:8080, sign up, and upload a video. Details, other addresses and hot-reload
+development are in [Run it](#run-it).
 
-![Upload: poster frame and duration taken in the browser](docs/screenshots/upload.png)
+## Features
 
-## Architecture
+- **Accounts:** sign up, sign in and sign out; 15-minute access JWT in memory, 7-day refresh token
+  in an `httpOnly`, `SameSite=Strict` cookie, rate-limited auth routes.
+- **Direct uploads:** presigned POST policy per file, a progress bar, and a poster frame and
+  duration captured in the browser.
+- **Streaming:** presigned GET URLs, so `<video>` seeks with plain HTTP range requests to MinIO.
+- **Browse and search:** newest-first list and MongoDB full-text search.
+- **Likes and views:** atomic, idempotent likes; play counts.
+- **Owner controls:** edit title and description, delete a video and its stored files.
+- **Stack:** NestJS 12, MongoDB (Mongoose 9), MinIO (S3-compatible) and Swagger on the API;
+  React 19, React Router 8, Vite 8 and Tailwind CSS 4 on the web.
+
+<p align="center">
+  <img src="docs/screenshots/watch.png" alt="Watch page: video player, like button, owner delete button and a more-videos rail." width="49%">
+  <img src="docs/screenshots/upload.png" alt="Upload page: choose a file, with a poster frame and duration taken in the browser." width="49%">
+  <br>
+  <sub>Watch page and upload page. Taken by Playwright from the running compose stack. To regenerate:
+  <code>docker compose up --build -d &amp;&amp; SCREENSHOTS=1 npx playwright test screenshots</code>.</sub>
+</p>
+
+## How it works
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
+    <img src="docs/assets/how-it-works.svg" alt="Diagram: the browser reaches the NestJS API through nginx for auth and signing, the API stores metadata in MongoDB, and the browser uploads to and streams from MinIO directly with presigned URLs." width="880">
+  </picture>
+</p>
 
 ```mermaid
 flowchart LR
@@ -164,6 +210,16 @@ Vite proxies `/api` to the API, so the browser sees one origin, as it does behin
 
 ## Tests
 
+| Check                                                      | How                                                              | State           | In CI |
+| ---------------------------------------------------------- | ---------------------------------------------------------------- | --------------- | ----- |
+| Lint, typecheck, unit + HTTP-layer tests, production build | `npm run lint && npm run typecheck && npm test && npm run build` | Passing locally | Yes   |
+| API end-to-end tests (real MongoDB + MinIO)                | `npm run test:e2e`, see below                                    | Passing locally | No    |
+| Browser smoke test (Playwright)                            | `npm run test:browser`, see below                                | Passing locally | No    |
+| `docker compose up --build`                                | [Run it](#run-it)                                                | Passing locally | No    |
+
+The last three need Docker. They were last run on 2026-10-15 against this compose stack (OrbStack on an
+Apple Silicon Mac): 17 API end-to-end tests and the browser smoke test passed.
+
 ```bash
 npm test             # API unit + HTTP-layer tests (Jest), web unit tests (Vitest); no services needed
 npm run test:e2e     # API end-to-end with supertest; needs .env and: docker compose up -d mongo minio minio-init
@@ -224,6 +280,17 @@ docker-compose.yml, .env.example, .github/workflows/ci.yml
   files whose delete failed. A bucket lifecycle rule or a sweeper job would clean them up.
 - **Search is MongoDB `$text`** (word stems, not prefixes or typos).
 - **Single region, no CDN, no HTTPS termination.** Set `COOKIE_SECURE=true` behind HTTPS.
+
+## Contributing
+
+Bug reports and pull requests are welcome. Before opening one, run what CI runs:
+
+```bash
+npm ci
+npm run format:check && npm run lint && npm run typecheck && npm test && npm run build
+```
+
+Use synthetic data in issues and screenshots, and remove credentials from anything you paste.
 
 ## License
 
