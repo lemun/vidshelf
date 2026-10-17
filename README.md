@@ -9,24 +9,20 @@ browse and search, watch it stream, and like it.
 - **Ops:** a single `docker compose` file runs MongoDB, MinIO with a bucket-init step, the API, and
   the web app behind nginx.
 
-I started this in 2025 as a learning project, and it stopped with the web app as a static mock. In
-October 2026 I finished it with a deliberately small scope: every feature listed here is wired end
-to end, and [What is not done](#what-is-not-done) lists what is missing.
+The scope is deliberately small: every feature listed here is wired end to end, and
+[What is not done](#what-is-not-done) lists what is missing.
 
 ## Status
 
-| Check                                                      | How                                                                           | State           |
-| ---------------------------------------------------------- | ----------------------------------------------------------------------------- | --------------- |
-| Lint, typecheck, unit + HTTP-layer tests, production build | `npm run lint && npm run typecheck && npm test && npm run build` (also in CI) | Passing locally |
-| API end-to-end tests (real MongoDB + MinIO)                | [Tests](#tests)                                                               | Passing locally |
-| Browser smoke test (Playwright)                            | [Tests](#tests)                                                               | Passing locally |
-| `docker compose up --build`                                | [Run it](#run-it)                                                             | Passing locally |
+| Check                                                      | How                                                              | State           | In CI |
+| ---------------------------------------------------------- | ---------------------------------------------------------------- | --------------- | ----- |
+| Lint, typecheck, unit + HTTP-layer tests, production build | `npm run lint && npm run typecheck && npm test && npm run build` | Passing locally | Yes   |
+| API end-to-end tests (real MongoDB + MinIO)                | [Tests](#tests)                                                  | Passing locally | No    |
+| Browser smoke test (Playwright)                            | [Tests](#tests)                                                  | Passing locally | No    |
+| `docker compose up --build`                                | [Run it](#run-it)                                                | Passing locally | No    |
 
-The last three need Docker. They ran on 2026-10-15 against this compose stack (OrbStack on an
-Apple Silicon Mac): 17 API end-to-end tests and the browser smoke test passed. CI does not run them
-yet. That first real run found a bug the mocked tests could not: the `ObjectId` references in the
-Mongoose schemas were declared so that they became untyped (`Mixed`) paths, so refresh-token
-rotation never matched its session. `apps/api/src/schemas.spec.ts` now guards against it.
+The last three need Docker. They were last run on 2026-10-15 against this compose stack (OrbStack on an
+Apple Silicon Mac): 17 API end-to-end tests and the browser smoke test passed.
 
 ## Screenshots
 
@@ -91,36 +87,11 @@ sequenceDiagram
   its region is fixed, signing never opens a network connection.
 - **Streaming uses a presigned GET URL** that is valid for one hour. `<video>` makes its own HTTP
   range requests to MinIO, so seeking works without any streaming code in the API.
-- **Auth.** The access token is a 15-minute JWT that the web app keeps only in memory. The refresh
-  token is a 7-day JWT in an `httpOnly`, `SameSite=Strict` cookie scoped to `/api/auth`.
-  - Each sign-in starts a session: one MongoDB document that stores the SHA-256 hash of the only
-    refresh token currently valid for it (never the token), a rotation counter and `revokedAt`.
-  - A refresh succeeds only through one conditional update of that document: "this session is not
-    revoked or expired and its current token is the one presented" → "store the replacement's
-    hash". So each refresh token works once.
-  - Presenting a token from an older generation of its session (one that was already used) is
-    treated as theft: that session and every other active session of the user are revoked.
-  - **Two-tab grace window.** Tabs share one cookie, so two tabs can refresh with the same token
-    at once (the web app serialises refreshes with the Web Locks API, but not every client has
-    it). The token the last rotation consumed is therefore accepted again for 10 seconds after
-    that rotation, once, while the session is live: the answer is a new access token and no new
-    cookie, because the winning request already set it. Outside that window, a second time, or
-    any older token, it is reuse as above. The cost: a thief replaying a just-rotated token
-    within those 10 seconds gets one access token (15 minutes) instead of triggering revocation.
-  - **Sign-out** ends the session the cookie's token belongs to, identified by the token's
-    signature, session id and generation (the current token or the one just replaced), not by
-    looking up its hash. So it still works if a refresh replaced the token a moment earlier.
-  - Revoking (reuse or sign-out) is also a single-document update, so it cannot be outrun by a
-    refresh in flight at the same moment: that refresh either stored its replacement first (and
-    the replacement is revoked with the session), or it finds the session revoked and fails
-    without returning a token. `auth.service.spec.ts` interleaves the two to check this.
-  - In the web app, signing out cancels any refresh in flight and ignores its response if it
-    still arrives (an "auth epoch" counter), so a late refresh cannot sign the user back in.
-  - Access tokens that were already issued stay valid until they expire (at most 15 minutes).
-    Sessions started by a new sign-in after a revocation are not affected.
-  - Every route requires a token unless it is marked `@Public()`. Public routes still read a
-    valid token if one is sent, which is how `likedByMe` works for signed-in viewers.
-  - `/api/auth/*` is rate limited per IP.
+- **Auth.** A 15-minute access JWT held in memory by the web app, plus a 7-day refresh token in an
+  `httpOnly`, `SameSite=Strict` cookie. Each refresh token works exactly once, and replaying a used one
+  revokes the user's sessions. A short grace window covers two tabs refreshing at the same time. Routes
+  require a token unless marked `@Public()`, and `/api/auth/*` is rate limited per IP. The full design,
+  including the races it handles, is in [docs/auth.md](docs/auth.md).
 - **Likes are atomic and idempotent.** Each like is one single-document update with a filter
   (`likedBy: {$ne: me}` with `$addToSet` and `$inc`), so double clicks and retries cannot skew the
   count.
